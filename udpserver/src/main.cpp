@@ -19,9 +19,7 @@
  * BUG-这里有问题
  */
 #include "Server.hpp"
-
 int main() {
-
   std::vector<uint16_t> newCoreIds = {0, 1, 2, 3, 4, 5};
   Server server;
   server.printfWorkInfo();

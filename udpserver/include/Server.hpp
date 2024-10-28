@@ -69,7 +69,7 @@ class Server {
       }
       std::this_thread::sleep_for(std::chrono::seconds(1));  // 控制发送频率
     }
-     close(sendSockfd);
+    close(sendSockfd);
   }
 
   /**
@@ -81,7 +81,8 @@ class Server {
  * 使用bind指定接收服务端数据的端口，因为客户端需要指定出服务端接收数据的端口，两个端口要统一
  * 
  */
-  void recvDataFromClient(const uint16_t& localRecvPort, std::atomic<bool>& running) {
+  void recvDataFromClient(const uint16_t& localRecvPort,
+                          std::atomic<bool>& running) {
     int recvSockfd = createSocketForPort(localRecvPort);
     struct sockaddr_in localServerAddr =
         createSockAddr("0.0.0.0", localRecvPort);
@@ -235,8 +236,7 @@ class Server {
                 << std::endl;
     } else {
       std::cout << "Thread ID: " << thread.get_id() << " bound to core "
-                << coreId<< std::endl;
+                << coreId << std::endl;
     }
   }
-
 };

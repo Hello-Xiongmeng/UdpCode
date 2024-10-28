@@ -13,9 +13,7 @@
 #include <thread>
 #include <vector>
 
-constexpr int size =
-    1024;  //在编译时，而不是再程序运行过程中使用可以确定的值使用constexpr关键字
-
+constexpr int size = 1024;
 class Client {
  public:
 
@@ -35,11 +33,12 @@ class Client {
  */
   void printfWorkInfo() {
     auto totalCores = std::thread::hardware_concurrency();
-    auto nowCpuCore = sched_getcpu();  // 获取当前 CPU 核心id
+    auto nowCpuCore = sched_getcpu();
     std::cout << "The total number of cores is " << totalCores << std::endl;
     std::cout << "Main thread ID is " << std::this_thread::get_id()
               << " and it is running on core " << nowCpuCore << std::endl;
   }
+  
   /**
  * @brief  将接收到的数据转换为大写
  * @param [入参] data: 
@@ -75,12 +74,12 @@ class Client {
                 << std::endl;
     } else {
       std::cout << "Sent data " << data << " to client at "
-                << serverInfo.serverIp<< ":" << serverInfo.serverRecvPort
+                << serverInfo.serverIp << ":" << serverInfo.serverRecvPort
                 << std::endl;
     }
   }
 
-/**
+  /**
  * @brief  处理数据并发送
  * @param [入参] serverInfo: 
  * @param [入参] running: 
@@ -194,7 +193,6 @@ class Client {
   }
 
  private:
-
   /**
  * @brief  创建一个网络通信通用结构体
  * @param [入参] ip: 输入通信ip

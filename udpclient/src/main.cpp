@@ -1,4 +1,3 @@
-
 /**
  * @File Name: main.cpp
  * @brief  实现服务端和客户端在收发数据时的多线程通讯
@@ -19,16 +18,12 @@
  * HACK-可能出现问题
  * BUG-这里有问题
  */
-
 #include "Client.hpp"
-
 int main() {
-
   std::vector<uint16_t> newCoreIds = {0, 1};
   Client client;
   client.printfWorkInfo();
-  Client::CommunicationInfo info = 
-      {"172.24.228.100", 8011, 8001};
+  Client::CommunicationInfo info = {"172.24.228.100", 8011, 8001};
   client.start(info, newCoreIds);
   return 0;
 }
