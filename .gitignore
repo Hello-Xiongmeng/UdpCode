@@ -4,6 +4,8 @@ udpserver/.vscode/
 udpserver/bin/
 udpserver/build/
 udpserver/demo.cpp
+udpserver/test.dot
+
 udpserver/.clang-format
 
 udpclient/.vscode/

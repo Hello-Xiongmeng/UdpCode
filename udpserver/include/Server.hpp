@@ -1,23 +1,60 @@
-
 #pragma once
 #include <arpa/inet.h>
+#include <net/if.h>  // for ifreq and interface names
 #include <netinet/in.h>
+#include <sys/ioctl.h>  // for ioctl() and ifreq
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-
+#include <fcntl.h>
 #include <strings.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <atomic>
+#include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
-#include <iostream>
+#include <ctime>
+#include <mutex>
+#include <queue>
 #include <string>
-#include <thread>
-#include <type_traits>
 #include <vector>
-const int size = 1024;
+
+
+///HINT - 建议根据应用程序的数据接收速率和处理速度来设置,还有硬件的带宽，要看程序单位时间能处理多少数据，缓冲区大小不能少于每次处理的数据量
+///TODO在命令行中设置系统参数： 使用 sysctl 命令增大接收和发送缓冲区的最大值。sudo sysctl -w net.core.rmem_max=1048576
+///TODOsudo sysctl - w net.core.wmem_max = 1048576
+///TODO使用 巨型帧（MTU > 1, 500）在支持的网络中可提高数据吞吐量。
+///TODO多线程发送读取，套接字支持多个线程使用
+ struct UdpHeader {
+    uint64_t timeStamp= 0;  // 时间戳 (组序号)
+    uint16_t sequence= 0;  // 分片序号
+    uint16_t total= 0;     // 总分片数
+    
+  };
+constexpr int MTU = 9000;//HINT巨型帧需要每次修改吗，使用巨型帧要确定双方配置相同，使用大数据包ping通，保证不丢失
+constexpr int IP_HEADER_SIZE = 20;
+constexpr int UDP_HEADER_SIZE = 8;
+constexpr int PACKET_HEADER_SIZE = sizeof(UdpHeader) ;
+constexpr int UDP_PAYLOAD_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE -
+                                 PACKET_HEADER_SIZE;  //1468，真实数据的大小
+
+constexpr int APP_BUF_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE;
+
+/**
+ * @brief  定义一个类继承runtime_error，理论上不可以通过读取代码来检测到的异常
+ * explicit修饰构造函数避免隐式调用，试抛出异常和捕获异常类型一直
+ * 在 Server 类中处理可恢复的异常，在 main 函数中处理不可恢复的和未捕获的异常
+ */
+class ServerException : public std::runtime_error {
+ public:
+  explicit ServerException(const std::string& msg) : std::runtime_error(msg) {}
+  //调用基类 std::runtime_error 的构造函数，msg传给基类，把msg存储，使用what（）打印
+};
 
 class Server {
+
  public:
   /**
   * @brief  成员clientRecvPort是客户端接收数据的端口，是指服务端要发送到客户端的端口
@@ -25,218 +62,117 @@ class Server {
   * FIXME:后续尝试指定端口发送数据，测试是否可以提升效率
   */
   struct CommunicationInfo {
-    std::string clientIp;
-    uint16_t clientRecvPort;
-    uint16_t localRecvPort;
+    const uint16_t clientId;
+    const std::string clientIp;
+    const uint16_t clientRecvPort;
+    const uint16_t localSendPort;
+    const uint16_t localRecvPort;
+
+    struct timeval sendApiStart = {0};
+    struct timeval recvApiStart = {0};
+    struct timeval sendApiEnd = {0};
+    struct timeval recvApiEnd = {0};
+    struct timeval oldSendApiEnd = {0};
+    struct timeval oldRecvApiEnd = {0};
+    unsigned long long sendLen = 0;
+    unsigned long long recvLen = 0;
+    //std::atomic<bool> isPrinting;
+    // std::atomic<bool> recvFlag = 0;
   };
 
-  Server() = default;
+  enum ThreadType {
+    SEND,  // 发送
+    RECV   // 接收
+  };
+ 
 
-  /**
- * @brief  输出当前线程id，核心信息
- */
-  void printfWorkInfo() {
-    auto totalCores = std::thread::hardware_concurrency();
-    auto nowCpuCore = sched_getcpu();  // 获取当前 CPU 核心id
-    std::cout << "The total number of cores is " << totalCores << std::endl;
-    std::cout << "Main thread ID is " << std::this_thread::get_id()
-              << " and it is running on core " << nowCpuCore << std::endl;
-  }
-  /**
- * @brief  发送数据到客户端
- * @param [入参] data: 发送的数据，注意使用const，函数内部就不会修改外部值
- * @param [入参] CommunicationInfo: 客户端的ip地址和客户端的接收端口，const同上
- * @param [入参] running: 多线程bool值默认使用原子类型即可，避免竞争出现
- * @note  服务器的发送端口由操作系统分配，想要指定需要手动绑定
- */
-  void sendDataToClient(const std::string& data,
-                        const CommunicationInfo& clientInfo,
-                        std::atomic<bool>& running) {
-    int sendSockfd = createSocketForPort(clientInfo.clientRecvPort);
-    struct sockaddr_in clientAddr =
-        createSockAddr(clientInfo.clientIp, clientInfo.clientRecvPort);
-    while (running) {
-      ssize_t sent_bytes =
-          sendto(sendSockfd, data.c_str(), data.size(), 0,
-                 (struct sockaddr*)&clientAddr, sizeof(clientAddr));
-      if (sent_bytes < 0) {
-        std::cerr << "Failed to send data to client at " << clientInfo.clientIp
-                  << ":" << clientInfo.clientRecvPort << std::endl;
-      } else {
-        std::cout << "Sent data " << data << " to client at "
-                  << clientInfo.clientIp << ":" << clientInfo.clientRecvPort
-                  << std::endl;
-      }
-      std::this_thread::sleep_for(std::chrono::seconds(1));  // 控制发送频率
-    }
-    close(sendSockfd);
-  }
+ public:
+  Server(std::vector<CommunicationInfo> infos);
 
-  /**
- * @brief  接收来自客户端的数据
- * @param [入参] recvPort: 
- * @param [入参] running: 
- * @note  使用createSockAddr("0.0.0.0", CommunicationInfo.recvPort)时，
- * 0.0.0.0监听所有可用的网卡IP，CommunicationInfo.recvPort指定本地服务端就收数据的端口
- * 使用bind指定接收服务端数据的端口，因为客户端需要指定出服务端接收数据的端口，两个端口要统一
- * 
- */
-  void recvDataFromClient(const uint16_t& localRecvPort,
-                          std::atomic<bool>& running) {
-    int recvSockfd = createSocketForPort(localRecvPort);
-    struct sockaddr_in localServerAddr =
-        createSockAddr("0.0.0.0", localRecvPort);
-    if (bind(recvSockfd, (struct sockaddr*)&localServerAddr,
-             sizeof(localServerAddr)) < 0) {
-      std::cerr << "Bind failed on port " << ntohs(localServerAddr.sin_port)
-                << std::endl;
-      close(recvSockfd);
-      return;
-    }
-    char buffer[size];
-    //FIXME这里是否不需要创建clientAddr，因为没有包含有用信息
-    while (running) {
-      ssize_t n = recvfrom(recvSockfd, buffer, size - 1, 0, nullptr, nullptr);
-      if (n > 0) {
-        buffer[n] = '\0';
-        std::cout << "Received result from client: " << buffer << std::endl;
-      } else {
-        std::cerr << "Failed to receive data from server." << std::endl;
-      }
-    }
-    close(recvSockfd);
-  }
+  ~Server();
 
-  /**
- * @brief  监听控制函数，在命令行输入stop可以停止发送和接收的while (running)
- * 循环，从而结束程序运行
- * @param [入参] running: 
- */
-  void controlInCommandline(std::atomic<bool>& running) {
-    std::string command;
-    while (running) {
-      std::cout << "Enter 'stop' to stop the server" << std::endl;
-      std::getline(std::cin, command);
-      if (command == "stop") {
-        running = false;
-        std::cout << "Stopping server..." << std::endl;
-        break;
-      }
-    }
-  }
+  uint16_t getClientNum();
 
-  /**
- * @brief  多线程收发
- * @param [入参] CommunicationInfos: 客户端的信息
- * @param [入参] coreIds: 核心id
- * @note  多线程编程中，在线程函数中传入外部参数时，直接使用引用类型（包括 const 引用和普通引用）是有风险的。
- * 这是因为线程的执行时间不确定，如果主线程退出或作用域结束，
- * 引用的变量也可能被销毁，导致子线程访问到无效的内存，
- * 最终引发未定义行为，如崩溃或 Segmentation Fault。
- *可以使用值传递，这样线程有自己的数据拷贝，避免引用外部变量。
- *也可以使用共享数据结构，如智能指针（例如 std::shared_ptr），保证对象的生命周期与线程一致。
- */
-  void start(const std::vector<CommunicationInfo>& infos,
-             const std::vector<uint16_t>& coreIds) {
-    if (coreIds.size() < infos.size() * 2) {
-      std::cerr << "Error:The total number of input core IDs does not meet the "
-                   "requirement"
-                << std::endl;
-      return;
-    } else {
-      std::cout << "The total number of input core IDs has met the needs for "
-                   "sending and receiving data"
-                << std::endl;
-    }
-    std::vector<std::thread> sendThreads;
-    std::vector<std::thread> recvThreads;
-    std::atomic<bool> running(true);
-    uint16_t coreIndex = 0;
+  CommunicationInfo* getClientInfoById(uint16_t clientId);
 
-    for (const auto& clientInfo : infos) {
-      //HINT:lambda表达式中变量的值默认是被追加了const的，不允许被修改。
-      //HINT:如果在lambda表达式中如果想对捕获列表中的变量进行修改，建议采用“引用 "指针"的方式。
-      sendThreads.emplace_back([this, clientInfo, &running]() {
-        std::string data = "hello";
-        sendDataToClient(data, clientInfo, running);
-      });  //NOTE:用emplace_back创建对象，lambda捕获this使用成员函数SendDataToClient
-      bindThreadToCore(
-          sendThreads.back(),
-          coreIds[coreIndex]);  //NOTE:back()获取容器最后一个元素的引用
-      recvThreads.emplace_back([this, clientInfo, &running]() {
-        recvDataFromClient(clientInfo.localRecvPort, running);
-      });
-      bindThreadToCore(recvThreads.back(), coreIds[coreIndex]);
-      coreIndex++;
-    }
 
-    //FIXME:首先这里的线程不需要绑定核心，不建议单独开辟一个线程实现控制功能，可能影响代码性能
-    std::thread controlThread(&Server::controlInCommandline, this,
-                              std::ref(running));  // 创建命令行控制线程
+  CommunicationInfo getClientInfos(uint16_t clientId);
 
-    for (auto& thread : sendThreads) {
-      thread.join();
-      for (auto& thread : recvThreads) {
-        thread.join();
-      }
-    }  // 等待所有线程结束
-  }
+  static unsigned long getExecutionTime(struct timeval& startTime,
+                                        struct timeval& stopTime);
+  void setPrintFlag(uint16_t clientId, bool flag);
+
+  bool getPrintFlag(uint16_t clientId);
+
+  void setRunnFlag(uint16_t clientId, bool flag);
+
+  bool getRunnFlag(uint16_t clientId);
+
+  void printClientInfo(const uint16_t& clientId);
+
+  void printRealTimeInfo(uint16_t clientId, ThreadType type);
+
+  struct sockaddr_in createSockAddr(const std::string& ip,
+                                    const uint16_t& port);
+  // 信号处理函数
+  void signalHandler(int signum);
+
+  void cleanup();
+
+  static void signalHandlerWrapper(int signum);
+
+  void* sendDataToClient(void* arg);
+
+  void convertTimestamp(uint64_t timestamp);
+
+  std::vector<float> generateData(size_t minSize, size_t);
+
+  void shardData();
+
+  void* recvDataFromClient(void* arg);
+
+  static void* sendThreadFunction(void* arg);
+
+  static void* recvThreadFunction(void* arg);
+
+  void recvDataFromFPGA(int recvSockfd, Server& server);
+
+  void start();
 
  private:
-  /**
- * @brief  创建一个网络通信通用结构体
- * @param [入参] ip: 输入通信ip
- * @param [入参] port: 输入通信端口
- * @return struct sockaddr_in: 返回结构体变量
- * @note  创建客户端的网络结构体信息时，string& ip输入客户端的ip地址，
- * 创建服务端网络结构体信息时，输入0.0.0.0监听所有可用的网卡IP
- */
-  struct sockaddr_in createSockAddr(const std::string& ip,
-                                    const uint16_t& port) {
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));  // 将结构体置零
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);  // 转为网络字节序
-    if (ip == "0.0.0.0") {
-      addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-      addr.sin_addr.s_addr = inet_addr(ip.c_str());  // 将IP地址转换为网络字节序
-    }
-    return addr;
-  }
+  void updateSysctlConfig(const std::string& parameter,
+                          const std::string& value);
+  void display(unsigned char* buf, int start, int end);
 
-  /**
- * @brief  创建网络通信udp套接字
- * @param [入参] recvPort: 只是用作输出提示信息，recvPort并没有实际应用
- * @return int: 返回文件描述符fd是file descriptor缩写
- */
-  int createSocketForPort(const uint16_t& recvPort) {
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-      std::cerr << "Socket creation failed for receiving on port " << recvPort
-                << std::endl;
-      return -1;
-    }
-    return sockfd;
-  }
+ private:
+  // 存储单例实例的指针
+  static Server* _instance;
+  std::vector<CommunicationInfo> _clientInfos;
+  uint16_t _clientNum;
+  uint16_t _sendPriority;
+  uint16_t _recvPriority;
+  pthread_attr_t _sendAttr;
+  pthread_attr_t _recvAttr;
+  unsigned long _stackSize;
+  std::queue<std::vector<char>> _sendProducer;
+  std::queue < std::vector < char >> _sendConsumer;
 
-  /**
- * @brief  将输入的线程对象绑定到输入的核心id
- * @param [入参] thread: 
- * @param [入参] coreId: 
- */
-  void bindThreadToCore(std::thread& thread, const uint16_t& coreId) {
-    pthread_t pthread = thread.native_handle();
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(coreId, &cpuset);
-    int result = pthread_setaffinity_np(pthread, sizeof(cpu_set_t), &cpuset);
-    if (result != 0) {
-      std::cerr << "Error setting thread affinity: " << strerror(result)
-                << std::endl;
-    } else {
-      std::cout << "Thread ID: " << thread.get_id() << " bound to core "
-                << coreId << std::endl;
-    }
-  }
+  std::mutex _sendMutex;
+  std::condition_variable _sendCondition;
+
+  std::vector<uint16_t> _coreIds;
+  std::vector<std::atomic<bool>> _isRunning;
+  // g_isRunning = false;  // 停止所有线程的循环
+
+  std::vector<std::atomic<bool>> _isPrinting;
+
+  unsigned long _printLimit;
+
+ public:
+  // 静态指针，指向 Server 实例
+  static Server* instance;
+
+  // std::condition_variable cv;
+  // std::mutex mtx;
+  // bool readyToPrint = false;  // 标志是否可以打印信息
 };

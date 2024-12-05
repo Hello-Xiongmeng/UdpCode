@@ -1,257 +1,149 @@
-
 #pragma once
 #include <arpa/inet.h>
+#include <net/if.h>  // for ifreq and interface names
+#include <netinet/in.h>
+#include <sys/ioctl.h>  // for ioctl() and ifreq
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <strings.h>
+#include <sys/time.h>
 #include <unistd.h>
+#include <Eigen/Dense>
 #include <atomic>
 #include <condition_variable>
+#include <csignal>
+#include <cstdio>
 #include <cstring>
-#include <iostream>
 #include <mutex>
 #include <queue>
 #include <string>
-#include <thread>
 #include <vector>
+#include "SignalProcess.hpp"
 
-constexpr int size = 1024;
-class Client {
+///HINT - 建议根据应用程序的数据接收速率和处理速度来设置,还有硬件的带宽，要看程序单位时间能处理多少数据，缓冲区大小不能少于每次处理的数据量
+///TODO在命令行中设置系统参数： 使用 sysctl 命令增大接收和发送缓冲区的最大值。sudo sysctl -w net.core.rmem_max=1048576
+///TODOsudo sysctl - w net.core.wmem_max = 1048576
+///TODO使用 巨型帧（MTU > 1, 500）在支持的网络中可提高数据吞吐量。
+///TODO多线程发送读取，套接字支持多个线程使用
+// 假设的包头结构
+
+/**
+ * @brief  定义一个类继承runtime_error，理论上不可以通过读取代码来检测到的异常
+ * explicit修饰构造函数避免隐式调用，试抛出异常和捕获异常类型一直
+ * 在 Client 类中处理可恢复的异常，在 main 函数中处理不可恢复的和未捕获的异常
+ */
+class ClientException : public std::runtime_error {
  public:
+  explicit ClientException(const std::string& msg) : std::runtime_error(msg) {}
+  //调用基类 std::runtime_error 的构造函数，msg传给基类，把msg存储，使用what（）打印
+};
 
+class Client {
+
+ public:
   /**
-  * @brief  成员sendPort是服务端接收数据的端口，是指客户端要发送到客户端的端口
+  * @brief  成员clientRecvPort是客户端接收数据的端口，是指服务端要发送到客户端的端口
+  * 没有指定接收发送，服务器的发送端口由操作系统分配
+  * FIXME:后续尝试指定端口发送数据，测试是否可以提升效率
   */
   struct CommunicationInfo {
-    std::string serverIp;
-    uint16_t serverRecvPort;
-    uint16_t localRecvPort;
+    const uint16_t serverId;
+    const std::string serverIp;
+    const uint16_t serverRecvPort;
+    const uint16_t localSendPort;
+    const uint16_t localRecvPort;
+
+    struct timeval sendApiStart = {0};
+    struct timeval recvApiStart = {0};
+    struct timeval sendApiEnd = {0};
+    struct timeval recvApiEnd = {0};
+    struct timeval oldSendApiEnd = {0};
+    struct timeval oldRecvApiEnd = {0};
+    unsigned long long sendLen = 0;
+    unsigned long long recvLen = 0;
+    //std::atomic<bool> isPrinting;
+    // std::atomic<bool> recvFlag = 0;
   };
 
-  Client() = default;
+  enum ThreadType {
+    SEND,  // 发送
+    RECV   // 接收
+  };
 
-  /**
- * @brief  输出当前线程id，核心信息
- */
-  void printfWorkInfo() {
-    auto totalCores = std::thread::hardware_concurrency();
-    auto nowCpuCore = sched_getcpu();
-    std::cout << "The total number of cores is " << totalCores << std::endl;
-    std::cout << "Main thread ID is " << std::this_thread::get_id()
-              << " and it is running on core " << nowCpuCore << std::endl;
-  }
-  
-  /**
- * @brief  将接收到的数据转换为大写
- * @param [入参] data: 
- * @return std::string: 
- */
-  std::string processData(const char* data) {
-    std::string processed(data);
-    for (auto& c : processed) {
-      c = toupper(c);
-    }
-    return processed;
-  }
+ public:
+  Client(std::vector<CommunicationInfo> infos);
 
-  /**
- * @brief  发送数据到服务端
- * @param [入参] data: 
- * @param [入参] serverInfo: 
- * @param [入参] sendSockfd: 
- * @param [入参] serverAddr: 
- * @param [入参] running: 
- */
-  void sendDataToServer(const std::string& data,
-                        const CommunicationInfo& serverInfo,
-                        const int sendSockfd,
-                        const struct sockaddr_in& serverAddr,
-                        std::atomic<bool>& running) {
-    ssize_t sent_bytes =
-        sendto(sendSockfd, data.c_str(), data.size(), 0,
-               (struct sockaddr*)&serverAddr, sizeof(serverAddr));
-    if (sent_bytes < 0) {
-      std::cerr << "Failed to send data to server at " << serverInfo.serverIp
-                << ":" << serverInfo.serverRecvPort << " - " << strerror(errno)
-                << std::endl;
-    } else {
-      std::cout << "Sent data " << data << " to client at "
-                << serverInfo.serverIp << ":" << serverInfo.serverRecvPort
-                << std::endl;
-    }
-  }
+  ~Client();
 
-  /**
- * @brief  处理数据并发送
- * @param [入参] serverInfo: 
- * @param [入参] running: 
- */
-  void processAndSendData(const CommunicationInfo& serverInfo,
-                          std::atomic<bool>& running) {
-    int sendSockfd = createSocketForPort(serverInfo.serverRecvPort);
-    struct sockaddr_in serverAddr =
-        createSockAddr(serverInfo.serverIp.c_str(), serverInfo.serverRecvPort);
-    while (running) {
-      std::unique_lock<std::mutex> lock(
-          _queueMutex);  //创建lock对象，尝试获取 _queueMutex 的锁，获取之后才能访问
-      _queueCondition.wait(
-          lock, [this] { return !_dataQueue.empty(); });  // 等待直到队列有数据
-      while (!_dataQueue.empty()) {
-        std::string data = std::move(_dataQueue.front());
-        _dataQueue.pop();
-        std::string processedData = processData(data.c_str());  // 处理数据
-        lock.unlock();  // 解锁，允许接收线程继续工作
-        sendDataToServer(processedData, serverInfo, sendSockfd, serverAddr,
-                         running);
-        lock.lock();  // 重新获取锁
-      }
-    }
-    close(sendSockfd);
-  }
+  uint16_t getClientNum();
 
-  /**
- * @brief  接收来自服务端的数据
- * @param [入参] localRecvPort: 
- * @param [入参] running: 
- */
-  void recvDataFromServer(const uint16_t& localRecvPort,
-                          std::atomic<bool>& running) {
-    int recvSockfd = createSocketForPort(localRecvPort);
-    struct sockaddr_in localClientAddr =
-        createSockAddr("0.0.0.0", localRecvPort);
+  CommunicationInfo* getServerInfoById(uint16_t cserverId);
 
-    if (bind(recvSockfd, (struct sockaddr*)&localClientAddr,
-             sizeof(localClientAddr)) < 0) {
-      std::cerr << "Bind failed on port " << ntohs(localClientAddr.sin_port)
-                << std::endl;
-      close(recvSockfd);
-      return;
-    }
-    char buffer[size];
-    while (running) {
-      ssize_t n = recvfrom(recvSockfd, buffer, size - 1, 0, nullptr, nullptr);
-      if (n > 0) {
-        buffer[n] = '\0';  // 确保以 '\0' 结束
-        std::cout << "Received from server: " << buffer << std::endl;
-        std::lock_guard<std::mutex> lock(_queueMutex);
-        _dataQueue.push(std::string(buffer));
-        _queueCondition.notify_one();  //通知一个处理线程有新数据
+  CommunicationInfo getServerInfos(uint16_t serverId);
 
-      } else {
-        std::cerr << "Failed to receive data from server." << std::endl;
-      }
-    }
-    close(recvSockfd);
-  }
+  static unsigned long getExecutionTime(struct timeval& startTime,
+                                        struct timeval& stopTime);
+  void setPrintFlag(uint16_t serverId, bool flag);
 
-  /**
- * @brief  监听控制函数，在命令行输入stop可以停止发送和接收的while (running)
- * 循环，从而结束程序运行
- * @param [入参] running: 
- */
-  void controlInCommandline(std::atomic<bool>& running) {
-    std::string command;
-    while (running) {
-      std::cout << "Enter 'stop' to stop the server" << std::endl;
-      std::getline(std::cin, command);
-      if (command == "stop") {
-        running = false;
-        std::cout << "Stopping server..." << std::endl;
-        break;
-      }
-    }
-  }
+  bool getPrintFlag(uint16_t serverId);
 
-  /**
- * @brief  多线程收发
- * @param [入参] info: 
- * @param [入参] coreIds: 
- */
-  void start(const CommunicationInfo& info,
-             const std::vector<uint16_t>& coreIds) {
-    if (coreIds.size() < 2) {
-      std::cerr << "Error:The total number of input core IDs does not meet the "
-                   "requirement"
-                << std::endl;
-      return;
-    } else {
-      std::cout << "The total number of input core IDs has met the needs for "
-                   "sending and receiving data"
-                << std::endl;
-    }
-    std::atomic<bool> running(true);
-    std::thread recvThread([this, info, &running]() {
-      recvDataFromServer(info.localRecvPort, running);
-    });
-    bindThreadToCore(recvThread, coreIds[0]);
-    std::thread processThread(
-        [this, info, &running]() { processAndSendData(info, running); });
-    bindThreadToCore(processThread, coreIds[1]);
+  void setRunnFlag(uint16_t serverId, bool flag);
 
-    std::thread controlThread(&Client::controlInCommandline, this,
-                              std::ref(running));  // 创建命令行控制线程
-    recvThread.join();
-    processThread.join();
-  }
+  bool getRunnFlag(uint16_t serverId);
 
- private:
-  /**
- * @brief  创建一个网络通信通用结构体
- * @param [入参] ip: 输入通信ip
- * @param [入参] port: 输入通信端口
- * @return struct sockaddr_in: 返回结构体变量
- * @note  创建客户端的网络结构体信息时，string& ip输入客户端的ip地址，
- * 创建服务端网络结构体信息时，输入0.0.0.0监听所有可用的网卡IP
- */
+  void printServerInfo(const uint16_t& serverId);
+
   struct sockaddr_in createSockAddr(const std::string& ip,
-                                    const uint16_t& port) {
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));  // 将结构体置零
-    addr.sin_family = AF_INET;       // 设置地址族为 IPv4
-    addr.sin_port = htons(port);     // 转为网络字节序
-    if (ip == "0.0.0.0" || ip.empty()) {
-      addr.sin_addr.s_addr = INADDR_ANY;  // 监听所有接口
-    } else {
-      addr.sin_addr.s_addr = inet_addr(ip.c_str());  // 将IP地址转换为网络字节序
-    }
-    return addr;
-  }
+                                    const uint16_t& port);
+  // 信号处理函数
+  void signalHandler(int signum);
 
-  /**
- * @brief  创建网络通信udp套接字
- * @param [入参] recvPort: 只是用作输出提示信息，recvPort并没有实际应用
- * @return int: 返回文件描述符
- */
-  int createSocketForPort(const uint16_t& recvPort) {
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-      std::cerr << "Socket creation failed for receiving on port " << recvPort
-                << std::endl;
-      return -1;
-    }
-    return sockfd;
-  }
+  void cleanup();
 
-  /**
- * @brief  将输入的线程对象绑定到输入的核心id
- * @param [入参] thread: 
- * @param [入参] coreId: 
- */
-  void bindThreadToCore(std::thread& thread, const uint16_t& coreId) {
-    pthread_t pthread = thread.native_handle();
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(coreId, &cpuset);
-    int result = pthread_setaffinity_np(pthread, sizeof(cpu_set_t), &cpuset);
-    if (result != 0) {
-      std::cerr << "Error setting thread affinity: " << strerror(result)
-                << std::endl;
-    } else {
-      std::cout << "Thread ID: " << thread.get_id() << " bound to core "
-                << coreId << std::endl;
-    }
-  }
+  static void signalHandlerWrapper(int signum);
+
+  void* sendDataToServer(void* arg);
+
+  void* recvDataFromServer(void* arg);
+
+  static void* sendThreadFunction(void* arg);
+
+  static void* recvThreadFunction(void* arg);
+
+  void start();
 
  private:
-  std::queue<std::string> _dataQueue;
-  std::mutex _queueMutex;  // 互斥量
+  void updateSysctlConfig(const std::string& parameter,
+                          const std::string& value);
+  void display(unsigned char* buf, int start, int end);
+
+ private:
+  // 存储单例实例的指针
+  std::vector<CommunicationInfo> _serverInfos;
+  uint16_t _serverNum;
+  uint16_t _sendPriority;
+  uint16_t _recvPriority;
+  pthread_attr_t _sendAttr;
+  pthread_attr_t _recvAttr;
+  unsigned long _stackSize;
+  unsigned long _printLimit;
+
+  std::vector<uint16_t> _coreIds;
+  std::vector<std::atomic<bool>> _isRunning;  //手动控制启动或停止
+  std::vector<std::atomic<bool>> _isPrinting;  //手动控制打印
+
+  std::queue<std::vector<char>> _consumerQueue;
+  std::queue<std::vector<char>> _producerQueue;
+  std::mutex _queueMutex;  // 使用 shared_ptr 管理 mutex
   std::condition_variable _queueCondition;
-};
+
+  uint16_t _timeOut;
+
+ public:
+  // 静态指针，指向 实例
+  static Client* instance;
+ private:
+  SignalProcess signalProcess;
+  };
