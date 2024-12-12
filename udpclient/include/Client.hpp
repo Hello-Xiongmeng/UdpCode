@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include "SignalProcess.hpp"
+#include "Socket.hpp"
 
 ///HINT - 建议根据应用程序的数据接收速率和处理速度来设置,还有硬件的带宽，要看程序单位时间能处理多少数据，缓冲区大小不能少于每次处理的数据量
 ///TODO在命令行中设置系统参数： 使用 sysctl 命令增大接收和发送缓冲区的最大值。sudo sysctl -w net.core.rmem_max=1048576
@@ -51,6 +52,7 @@ class Client {
   struct CommunicationInfo {
     const uint16_t serverId;
     const std::string serverIp;
+    Socket::ProtocolType protocolType;
     const uint16_t serverRecvPort;
     const uint16_t localSendPort;
     const uint16_t localRecvPort;
@@ -112,7 +114,8 @@ class Client {
 
   static void* recvThreadFunction(void* arg);
 
-  void start();
+  void convertTimestamp(uint64_t timestamp);
+      void start();
 
  private:
   void updateSysctlConfig(const std::string& parameter,

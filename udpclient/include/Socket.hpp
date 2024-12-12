@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdexcept>
+#include <atomic>
 
 // 假设的包头结构
 //结构体会填充
@@ -17,7 +18,7 @@
 |      8         |     2      |     2      |     4      |
 +----------------+------------+------------+------------+
 */
-struct UdpHeader {
+struct Header {
   uint64_t timeStamp = 0;  // 时间戳 (组序号)
   uint16_t sequence = 0;   // 分片序号
   uint16_t total = 0;      // 总分片数
@@ -26,11 +27,16 @@ struct UdpHeader {
 constexpr int MTU = 9000;
 constexpr int IP_HEADER_SIZE = 20;
 constexpr int UDP_HEADER_SIZE = 8;
-constexpr int PACKET_HEADER_SIZE = sizeof(UdpHeader);
+constexpr int TCP_HEADER_SIZE = 20;
+
+constexpr int PACKET_HEADER_SIZE = sizeof(Header);
 constexpr int UDP_PAYLOAD_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE -
                                  PACKET_HEADER_SIZE;  //1468，真实数据的大小
+constexpr int TCP_PAYLOAD_SIZE = MTU - IP_HEADER_SIZE - TCP_HEADER_SIZE -
+                                 PACKET_HEADER_SIZE;  //1468，真实数据的大小
 
-constexpr int APP_BUF_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE;
+constexpr int UDP_APP_BUF_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE;
+constexpr int TCP_APP_BUF_SIZE = MTU - IP_HEADER_SIZE - TCP_HEADER_SIZE;
 
 #define CORE_BUF_SIZE 67108864
 
@@ -55,25 +61,30 @@ class SocketCreationException : public SocketException {
 class Socket {
 
  public:
-  enum SocketType {
+  enum ProtocolType {
+    TCP,  // TCP 连接
+    UDP   // UDP 连接
+  };
+  enum SocketMode {
     SEND,  // 发送
     RECV   // 接收
   };
 
  public:
-  Socket(int domain, int type, int protocol);
+  Socket(int domain, ProtocolType protocolType, SocketMode socketMode,
+         int protocol);
 
   ~Socket();
 
   int getFd() const;
-
-  void setMaxSocketBufferSize(SocketType bufferType);
+  int getAppBufSize() const;
+  void setMaxSocketBufferSize();
 
   void bindSocketToInterface(const char* interfaceName);
 
   struct sockaddr_in createSockAddr(const std::string& ip,
                                     const uint16_t& port);
-  void configureSocket(const uint16_t& port, SocketType type);
+  int configureSocket(const uint16_t& port, std::atomic<bool>& runFlag);
 
  private:
   int _sockfd;
@@ -82,4 +93,7 @@ class Socket {
   unsigned long _coreRecvBufSize;
   unsigned long _coreSendBufSize;
   std::string _ifName;  //socket绑定网卡
+
+  ProtocolType _protocolType;
+  SocketMode _socketMode;
 };

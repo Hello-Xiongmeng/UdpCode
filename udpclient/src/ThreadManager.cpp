@@ -4,7 +4,7 @@
 #include <thread>
 #include "ChangePrint.hpp"
 
-//#define DEBUG
+#define DEBUG
 
 void ThreadManager::setThreadAttributes(pthread_attr_t& attr, int priority,
                                         int stackSize) {

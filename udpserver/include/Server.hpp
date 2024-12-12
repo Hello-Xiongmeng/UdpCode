@@ -20,6 +20,7 @@
 #include <queue>
 #include <string>
 #include <vector>
+#include "Socket.hpp"
 
 
 ///HINT - 建议根据应用程序的数据接收速率和处理速度来设置,还有硬件的带宽，要看程序单位时间能处理多少数据，缓冲区大小不能少于每次处理的数据量
@@ -27,20 +28,7 @@
 ///TODOsudo sysctl - w net.core.wmem_max = 1048576
 ///TODO使用 巨型帧（MTU > 1, 500）在支持的网络中可提高数据吞吐量。
 ///TODO多线程发送读取，套接字支持多个线程使用
- struct UdpHeader {
-    uint64_t timeStamp= 0;  // 时间戳 (组序号)
-    uint16_t sequence= 0;  // 分片序号
-    uint16_t total= 0;     // 总分片数
-    
-  };
-constexpr int MTU = 9000;//HINT巨型帧需要每次修改吗，使用巨型帧要确定双方配置相同，使用大数据包ping通，保证不丢失
-constexpr int IP_HEADER_SIZE = 20;
-constexpr int UDP_HEADER_SIZE = 8;
-constexpr int PACKET_HEADER_SIZE = sizeof(UdpHeader) ;
-constexpr int UDP_PAYLOAD_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE -
-                                 PACKET_HEADER_SIZE;  //1468，真实数据的大小
-
-constexpr int APP_BUF_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE;
+ 
 
 /**
  * @brief  定义一个类继承runtime_error，理论上不可以通过读取代码来检测到的异常
@@ -64,6 +52,7 @@ class Server {
   struct CommunicationInfo {
     const uint16_t clientId;
     const std::string clientIp;
+    Socket::ProtocolType protocolType;
     const uint16_t clientRecvPort;
     const uint16_t localSendPort;
     const uint16_t localRecvPort;
@@ -171,6 +160,7 @@ class Server {
  public:
   // 静态指针，指向 Server 实例
   static Server* instance;
+    std::atomic<bool>   _isTcpConnected;
 
   // std::condition_variable cv;
   // std::mutex mtx;

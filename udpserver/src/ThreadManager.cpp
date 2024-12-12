@@ -1,9 +1,10 @@
 
 #include "ThreadManager.hpp"
+#include "ChangePrint.hpp"
 #include <thread>
 #include <iostream>
 
-//#define DEBUG
+#define DEBUG
 
 void ThreadManager::setThreadAttributes(pthread_attr_t& attr, int priority,
                                         int stackSize) {

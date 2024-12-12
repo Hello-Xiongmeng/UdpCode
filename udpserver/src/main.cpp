@@ -20,6 +20,7 @@
  */
 //#include <boost/format.hpp>
 #include "ChangePrint.hpp"
+#include "Socket.hpp"
 #include "ThreadManager.hpp"
 #include "Server.hpp"
 enum ProcessingBoard {
@@ -35,13 +36,14 @@ Server* Server::instance = nullptr;
 int main() {
 
   try {
+
     pthread_attr_t mainAttr;
 
     ThreadManager::bindThreadToCore(pthread_self(),
                                     0);  //主线程绑定核心,设置线程属性
     ThreadManager::setThreadAttributes(mainAttr, 90, 1024 * 1024);
 
-    Server server({{0, "172.29.183.243 ", 8001, 8002, 8011}});
+    Server server({{0, "172.29.183.243 ",Socket::TCP, 8001, 8002, 8011}});
     Server::instance = &server;  // 将实例指针传递给静态变量
     server.setPrintFlag(0, true);
     server.start();
@@ -53,6 +55,18 @@ int main() {
     //  std::cout << timestamp<< std::endl;
 
     //  server.convertTimestamp(timestamp);
+
+
+// std::atomic<bool> test = true  ;
+
+//   // 创建发送socket，根据协议类型选择TCP或UDP
+//     Socket sendSocket(AF_INET, Socket::TCP, Socket::SEND, 0);
+//     sendSocket.configureSocket(8002, test );
+    
+//     struct sockaddr_in clientAddr = sendSocket.createSockAddr("172.29.183.243 ",  8001);
+
+
+    
     getchar();
 
   } catch (const ServerException& e) {

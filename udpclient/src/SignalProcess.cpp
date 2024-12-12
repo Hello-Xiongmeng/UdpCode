@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include "ChangePrint.hpp"
 
-const int THREAD_POOL_NUM = 12;  // 单位：秒
+const int THREAD_POOL_NUM = 4;  // 单位：秒
 
 SignalProcess::SignalProcess(std::queue<std::vector<char>>& consumerQueue,
                              std::mutex& queueMutex,
@@ -50,6 +50,7 @@ void SignalProcess::start(std::atomic<bool>& isRunningFlag) {
       if (_consumerQueue.empty() && !isRunningFlag) {
 
         break;
+
       }
       while (!_consumerQueue.empty()) {
         // 检查数据是否足够
@@ -68,8 +69,8 @@ void SignalProcess::start(std::atomic<bool>& isRunningFlag) {
       }
     }
 
-    checkMissingPackets(recvPackets, missTimeFlag,
-                        prtPackets);  //记录丢包得时间戳直接丢掉
+      checkMissingPackets(recvPackets, missTimeFlag,
+                         prtPackets);  //记录丢包得时间戳直接丢掉
 
     //函数执行结束
     recvPackets.clear();
@@ -88,11 +89,11 @@ void SignalProcess::start(std::atomic<bool>& isRunningFlag) {
 
 void SignalProcess::processData(prtPacket&& prt) {
 
- // convertTimestamp(prt.header.timeStamp);
-  // for (int i = 0; i < 10; i++) {
-  //   std::cout << prt.payload[i] << " , ";
-  //     }
-  //     std::cout << "\n";
+ convertTimestamp(prt.header.timeStamp);
+  for (int i = 0; i < 10; i++) {
+    std::cout << prt.payload[i] << " , ";
+      }
+      std::cout << "\n";
 
 }
 
@@ -111,55 +112,63 @@ std::queue<prtPacket> SignalProcess::checkMissingPackets(
 
   for (auto& packet : recvPackets) {
     // 提取包头
-    memcpy(&packet.header, packet.payload.data(), sizeof(UdpHeader));
+    memcpy(&packet.header, packet.payload.data(), sizeof(Header));
     packet.payload.erase(packet.payload.begin(),
-                         packet.payload.begin() + sizeof(UdpHeader));
+                         packet.payload.begin() + sizeof(Header));
     groupPackets[packet.header.timeStamp].insert(packet.header.sequence);
     //每个分片序号插入到对应的时间戳对应的集合,如果有多组数据（多组时间戳），会插入新的键值对
     // 只有当总包数发生变化时，才更新 totalFragmentsMap，//只有当时间戳变化时插入新的键，在总包数变化时插入新的值
     if (totalFragmentsMap[packet.header.timeStamp] != packet.header.total) {
-      totalFragmentsMap[packet.header.timeStamp] = packet.header.total;  //
+
+      totalFragmentsMap[packet.header.timeStamp] = packet.header.total;  
     }
   }
 
-  // 检查每个时间戳的数据包是否丢失
-  for (const auto& [timestamp, sequences] : groupPackets) {
-    uint16_t totalFragments = totalFragmentsMap[timestamp];
 
-    bool missing = false;
 
-    // 检查是否丢失了任何数据包
-    for (uint16_t i = 0; i < totalFragments; ++i) {
-      if (sequences.find(i) == sequences.end()) {
-        // 丢包
-        missing = true;
-        missTimeFlag.push_back(timestamp);
-        break;  // 一旦发现丢包，就跳出循环，忽略该时间戳的数据
-      }
-    }
+      // 检查每个时间戳的数据包是否丢失
+      for (const auto& [timestamp, sequences] : groupPackets) {
+        uint16_t totalFragments = totalFragmentsMap[timestamp];
 
-    if (missing) {
-      convertTimestamp(timestamp);
+        bool missing = false;
 
-      printWithColor("red", "Missing packets for : ");
+        // 检查是否丢失了任何数据包
+        for (uint16_t i = 0; i < totalFragments; ++i) {
+          if (sequences.find(i) == sequences.end()) {
+        
+
+            // 丢包
+            missing = true;
+            missTimeFlag.push_back(timestamp);
+            break;  // 一旦发现丢包，就跳出循环，忽略该时间戳的数据
+          }
+        }
+
+        if (missing) {
+          convertTimestamp(timestamp);
+
+          printWithColor("red", "Missing packets for : ");
           //输出丢失的包的序号
           for (uint16_t i = 0; i < totalFragments; ++i) {
         if (sequences.find(i) == sequences.end()) {
           printWithColor("red", i, " ");
         }
       }
-    } else {
-      // 没有丢包，开始拼接有效数据
-      Eigen::VectorXcf fullPayloadEigen;
-      int length = 0;
+        } else {
 
-      // 计算有效数据的总复数个数
-      for (auto& packet : recvPackets) {
-        //确定是没丢包的时间戳对应的数据包
-        if (packet.header.timeStamp == timestamp) {
-          length += packet.payload.size() /
-                    (2 * sizeof(float));  // 每两个浮动数对应一个复数
-        }
+          std::cout << "没有丢包" << std::endl;
+
+          // 没有丢包，开始拼接有效数据
+          Eigen::VectorXcf fullPayloadEigen;
+          int length = 0;
+
+          // 计算有效数据的总复数个数
+          for (auto& packet : recvPackets) {
+            //确定是没丢包的时间戳对应的数据包
+            if (packet.header.timeStamp == timestamp) {
+              length += packet.payload.size() /
+                        (2 * sizeof(float));  // 每两个浮动数对应一个复数
+            }
       }
 
       // 预分配空间

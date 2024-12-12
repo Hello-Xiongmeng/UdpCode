@@ -1,23 +1,26 @@
 #include "Server.hpp"
-#include "Socket.hpp"
-#include "ThreadManager.hpp"
-#include "ChangePrint.hpp"
-#include <chrono>
-#include <random>
+#include <sys/types.h>
 #include <algorithm>
-#include <iomanip>
+#include <chrono>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <random>
 #include <thread>
 #include <tuple>
+#include "ChangePrint.hpp"
+#include "Socket.hpp"
+#include "ThreadManager.hpp"
 
 Server::Server(std::vector<Server::CommunicationInfo> infos)
     : _clientInfos(std::move(infos)),
       _clientNum(_clientInfos.size()),
       _sendPriority(80),
-      _recvPriority(90),        //接收的优先级高
-      _stackSize(1024 * 1024),  //1M
+      _recvPriority(90),             //接收的优先级高
+      _stackSize(1024 * 1024),       //1M
       _coreIds({0, 1, 2, 3, 4, 5}),  //核心
-      _printLimit(10000)   // 
+      _printLimit(10000)             //
 {
   // 设置示例：将接收和发送缓冲区大小设置为 1048576 字节
   //TODO具体设置大小要进行实测，1M的缓冲区可能过大
@@ -38,7 +41,7 @@ Server::Server(std::vector<Server::CommunicationInfo> infos)
   for (auto& runFlag : _isRunning) {
     runFlag.store(true);  // 初始化为 true
   }
-
+  _isTcpConnected = false;
 }
 
 Server::~Server() {
@@ -187,83 +190,176 @@ void* Server::sendDataToClient(void* arg) {
   CommunicationInfo& info = std::get<0>(*args);
   try {
     unsigned long sendCount = 0;
-    Socket sendSocket(AF_INET, SOCK_DGRAM, 0);
-    sendSocket.configureSocket(info.localSendPort, Socket::SEND);
+    int64_t timeStamp;
+    int64_t oldTimeStamp;
+    // 创建发送socket，根据协议类型选择TCP或UDP
+    Socket sendSocket(AF_INET, info.protocolType, Socket::SEND, 0);
+    sendSocket.configureSocket(info.localSendPort, _isRunning[0]);
+
     struct sockaddr_in clientAddr =
         createSockAddr(info.clientIp, info.clientRecvPort);
+
+    // TCP特有的变量
+
     while (getRunnFlag(info.clientId)) {
 
-
-      std::unique_lock<std::mutex> lock(_sendMutex);
-      _sendCondition.wait(lock, [this, info] {
-        return !_sendConsumer.empty() || !getRunnFlag(info.clientId);
-      });
-
-      if (_sendConsumer.empty() && !getRunnFlag(info.clientId)) {
-
-        break;
-      }
-      ///NOTE:每次至少发送一个PRT
-
-      printWithColor("yellow", "Sendqueue's size is ", _sendConsumer.size());
-
-      while (!_sendConsumer.empty()) {
-
-        ssize_t sendBytes =
-            sendto(sendSocket.getFd(), _sendConsumer.front().data(),
-                   _sendConsumer.front().size(), 0,
-                   (struct sockaddr*)&clientAddr, sizeof(clientAddr));
-
-        _sendConsumer.pop();  //释放数据所有权,调用析构函数
-
-        // std::this_thread::sleep_for(std::chrono::seconds(1));
-        if (sendBytes < 0) {
-          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // 缓冲区已满，等待一段时间重试,不用抛出异常
-            std::cout << "Send buffer is full, retrying..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-          } else {
-            throw ServerException("Failed to send data: " + info.clientIp +
-                                  " " + std::string(strerror(errno)));
-          }
-        } else if (getPrintFlag(info.clientId) == false) {
-          sendCount = 0;
-          info.sendLen = 0;
-        } else if (getPrintFlag(info.clientId) == true) {
-
-          if (sendBytes != APP_BUF_SIZE) {
-          
-            printWithColor("blue","This is send thread last packet size: ",sendBytes," bytes");
-          }
-
-          sendCount++;
-          info.sendLen += sendBytes;
-
-          if (sendCount == 1) {
-            gettimeofday(&info.sendApiStart, NULL);
-          } else if (sendCount >= _printLimit) {
-            gettimeofday(&info.sendApiEnd, NULL);
-
-            auto consumeTime =
-                getExecutionTime(info.sendApiStart, info.sendApiEnd);
-
-            std::cout << "Thread " << std::this_thread::get_id()
-                      << " bandwidth is :"
-                      << (double)(info.sendLen) * 8 * 1000000 / 1024 / 1024 /
-                             1024 / consumeTime
-                      << "Gb / s" << std::endl;
-            sendCount = 0;
-            info.sendLen = 0;
-            consumeTime = 0;
-            // 通知打印线程
-          }
-          // std::cout << "Sent data to client at " << info.clientIp
-          //           << ":" << info.clientRecvPort << std::endl;
+      // 如果是TCP协议，需要在每次发送前确保连接
+      if (info.protocolType == Socket::TCP && !_isTcpConnected) {
+        // 尝试连接TCP客户端
+        if (connect(sendSocket.getFd(), (struct sockaddr*)&clientAddr,
+                    sizeof(clientAddr)) < 0) {
+          std::cout << "Failed to connect to TCP client, retrying..."
+                    << std::endl;
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(1000));  // 休眠1秒后重试
+          continue;                              // 重试连接
+        } else {
+          std::cout << "Successfully connected to TCP client." << std::endl;
+          // 发送“准备就绪”消息
+          std::string readyMessage = "READY";
+          send(sendSocket.getFd(), readyMessage.c_str(), readyMessage.length(),
+               0);
+          std::cout << "Sent 'READY' message to receiver." << std::endl;
         }
       }
 
-      //解锁
+      char buffer[256];
+
+      while (info.protocolType == Socket::TCP && !_isTcpConnected &&
+             getRunnFlag(info.clientId)) {
+
+        // 设置超时
+        fd_set readfds;
+        struct timeval timeout;
+        timeout.tv_sec = 1;  // 设置超时时间为1秒
+        timeout.tv_usec = 0;
+
+        FD_ZERO(&readfds);
+        FD_SET(sendSocket.getFd(), &readfds);
+
+        // 使用select来等待接收端的响应
+        int ret = select(sendSocket.getFd() + 1, &readfds, nullptr, nullptr,
+                         &timeout);
+        if (ret == -1) {
+          std::cerr << "Error in select: " << strerror(errno) << std::endl;
+          break;
+        } else if (ret == 0) {
+          // 超时未收到数据
+          std::cout << "Timeout, no response from receiver. Retrying..."
+                    << std::endl;
+
+        } else {
+          // 收到数据
+          ssize_t received =
+              recv(sendSocket.getFd(), buffer, sizeof(buffer), 0);
+          if (received > 0 && std::string(buffer) == "OK") {
+            std::cout << "Receiver is ready. Now sending data..." << std::endl;
+            _isTcpConnected = true;  // 标记接收端已准备好
+            break;                   // 退出握手循环，开始发送数据
+          } else if (received < 0 && errno == EWOULDBLOCK) {
+            // 非阻塞模式，暂时没有数据
+            std::cout << "No data received, retrying..." << std::endl;
+          } else {
+            std::cout
+                << "Receiver not ready or error in receiving data. Retrying..."
+                << std::endl;
+          }
+        }
+      }
+      {
+
+        std::unique_lock<std::mutex> lock(_sendMutex);
+        //std::cout << "发送线程上锁" << std::endl;
+
+        _sendCondition.wait(lock, [this, info] {
+         // std::cout << "发送线程等待" << std::endl;
+
+          return !_sendConsumer.empty() || !getRunnFlag(info.clientId);
+        });
+
+        if (_sendConsumer.empty() && !getRunnFlag(info.clientId)) {
+          break;  // 如果队列为空且停止标志被设置，跳出循环
+        }
+
+        // 输出发送队列的大小
+        printWithColor("yellow", "Sendqueue's size is ", _sendConsumer.size());
+
+        while (!_sendConsumer.empty()) {
+          ssize_t sendBytes = 0;
+
+          if (info.protocolType == Socket::UDP) {
+            // 对于UDP，直接发送，不需要连接
+            sendBytes =
+                sendto(sendSocket.getFd(), _sendConsumer.front().data(),
+                       _sendConsumer.front().size(), 0,
+                       (struct sockaddr*)&clientAddr, sizeof(clientAddr));
+
+            memcpy(&timeStamp, _sendConsumer.front().data(), sizeof(uint64_t));
+
+            if (timeStamp != oldTimeStamp) {
+              oldTimeStamp = timeStamp;
+              convertTimestamp(timeStamp);
+            }
+            } else if (info.protocolType == Socket::TCP) {
+
+          sendBytes = send(sendSocket.getFd(), _sendConsumer.front().data(),
+                           _sendConsumer.front().size(), 0);
+     
+          memcpy(&timeStamp, _sendConsumer.front().data(), sizeof(uint64_t));
+
+          if (timeStamp != oldTimeStamp) {
+            oldTimeStamp = timeStamp;
+            convertTimestamp(timeStamp);
+          }
+          }
+
+          _sendConsumer.pop();  // 释放数据所有权,调用析构函数
+
+          // 检查发送是否成功
+          if (sendBytes < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+              // 缓冲区已满，等待重试
+              std::cout << "Send buffer is full, retrying..." << std::endl;
+              std::this_thread::sleep_for(std::chrono::milliseconds(100));
+              continue;
+            } else {
+              throw ServerException("Failed to send data: " + info.clientIp +
+                                    " " + std::string(strerror(errno)));
+            }
+          } else {
+            if (getPrintFlag(info.clientId) == false) {
+              sendCount = 0;
+              info.sendLen = 0;
+            } else {
+              // 打印带宽信息
+              // if (sendBytes != sendSocket.getAppBufSize()) {
+              //   printWithColor("blue", "This is send thread last packet size: ",
+              //                  sendBytes, " bytes");
+              // }
+
+              sendCount++;
+              info.sendLen += sendBytes;
+
+              if (sendCount == 1) {
+                gettimeofday(&info.sendApiStart, NULL);
+              } else if (sendCount >= _printLimit) {
+                gettimeofday(&info.sendApiEnd, NULL);
+                auto consumeTime =
+                    getExecutionTime(info.sendApiStart, info.sendApiEnd);
+                std::cout << "Thread " << std::this_thread::get_id()
+                          << " bandwidth is :"
+                          << (double)(info.sendLen) * 8 * 1000000 / 1024 /
+                                 1024 / 1024 / consumeTime
+                          << "Gb / s" << std::endl;
+                sendCount = 0;
+                info.sendLen = 0;
+              }
+            }
+          }
+        }
+
+        //   _sendCondition.notify_one();
+      }
     }
   } catch (const SocketException& e) {
     std::cerr << "Socket exception occurred: " << e.what() << std::endl;
@@ -318,7 +414,7 @@ std::vector<float> Server::generateData(size_t minSize, size_t maxSize) {
   std::uniform_int_distribution<size_t> dist(minSize, maxSize);
   size_t dataSize = dist(gen);
   std::vector<float> data(dataSize);
-  char* rawMemory = new char[PACKET_HEADER_SIZE + UDP_PAYLOAD_SIZE];
+  char* rawMemory = new char[PACKET_HEADER_SIZE + TCP_PAYLOAD_SIZE];
   std::unique_ptr<char[]> sendPacket(rawMemory);
   // 填充数据（可以是随机数）
   for (size_t i = 0; i < dataSize; ++i) {
@@ -330,47 +426,33 @@ std::vector<float> Server::generateData(size_t minSize, size_t maxSize) {
 // 接收线程，模拟接收数据并分包,每次接收一组
 void Server::shardData() {
 
+  size_t payloadSize = (_clientInfos[0].protocolType == Socket::TCP)
+                         ? TCP_PAYLOAD_SIZE
+                         : UDP_PAYLOAD_SIZE;
+
   int j = 0;
+
   while (getRunnFlag(0)) {
-    for (; j < 100; j++) {
+    for (; j <600; j++) {
 
-      // if (j%10 == 0) {
+      auto data = generateData(16 * 3260, 18 * 3260);  //随机生成2-3MB数据
 
-      //   std::this_thread::sleep_for(std::chrono::seconds(1));
-      // }
-                                         // 模拟生成数据64 * 3260 * 4180 * 3260 * 4)
-      auto data = generateData(64 * 3260 * 4,180 * 3260 * 4 );  //随机生成
-    
-
-      size_t totalBytes = data.size() * sizeof(float);         //字节数
+      size_t totalBytes = data.size() * sizeof(float);  //字节数
       //向上取整的数学公式 ⌈a/b⌉=(a+b−1)/b  避免丢失包
-      int totalPackets = (totalBytes + UDP_PAYLOAD_SIZE - 1) / UDP_PAYLOAD_SIZE;
+      int totalPackets = (totalBytes + payloadSize - 1) / payloadSize;
       // 获取当前时间戳作为组序号
       uint64_t timestamp =
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::system_clock::now().time_since_epoch())
               .count();
-
-      //convertTimestamp(timestamp);
-      //以复数形式输出10个数据
-      
-      // for (int i = 0; i < 10; i++) {
-      //   std::cout << "(" << data[i * 2] << " , ";
-      //   std::cout << data[i * 2 + 1] << ")";
-
-      // }
-      // 分包并存入队列
       for (int i = 0; i < totalPackets; ++i) {
 
-        if (i == 80 && (j % 10 == 0)) {
-          convertTimestamp(timestamp);
-          continue;
-        }
-
-        // 填充负载
-        size_t offset = i * UDP_PAYLOAD_SIZE;  //原始分片起始位置
-        size_t payloadSize = std::min(static_cast<size_t>(UDP_PAYLOAD_SIZE),
-                                      totalBytes - offset);
+        // if (i == 2 ) {
+        //   continue;
+        // }
+        size_t offset = i * payloadSize;  //原始分片起始位置
+        size_t realPayloadSize =
+            std::min(static_cast<size_t>(payloadSize), totalBytes - offset);
 
         ///FIXME 最后一片数据不会填满，要怎么处理，在发送时处理还是接收时处理
         ///NOTE:使用负载数去开辟内存，保证不会多发数据
@@ -378,70 +460,48 @@ void Server::shardData() {
 
         // std::unique_ptr<char[]> sendPacket(rawMemory);  //在堆上给智能指针管理内存
 
-        std::vector<char> sendPacket2(PACKET_HEADER_SIZE + payloadSize);
+        std::vector<char> sendPacket(PACKET_HEADER_SIZE + payloadSize);
 
-        UdpHeader header = {timestamp, static_cast<uint16_t>(i),
-                            static_cast<uint16_t>(totalPackets)};
-        //  memcpy(a, b, c);把在b位置的c个数据拷贝到a位置
+        Header header =
+            {timestamp, static_cast<uint16_t>(i), static_cast<uint16_t>(totalPackets)};
 
-        memcpy(sendPacket2.data(), &header, PACKET_HEADER_SIZE);  //放在头部
+        memcpy(sendPacket.data(), &header, PACKET_HEADER_SIZE);  //放在头部
 
-        memcpy(sendPacket2.data() + PACKET_HEADER_SIZE,
+        memcpy(sendPacket.data() + PACKET_HEADER_SIZE,
                reinterpret_cast<const char*>(data.data()) + offset,
-               payloadSize);
-
-        _sendProducer.push(std::move(sendPacket2));
-
-        if (i == totalPackets - 1) {
-          // printWithColor("blue", "This is main thread last packet size: ",
-          //                payloadSize + PACKET_HEADER_SIZE, " bytes");
-
-          //  std::cout << "This is main thread last packet size: "
-          //            << payloadSize + PACKET_HEADER_SIZE << " bytes" << std::endl;
+               realPayloadSize);
+        // 如果这是最后一个包，填充零值
+        if (realPayloadSize < payloadSize) {
+          // 填充剩余的空间为零
+          std::memset(sendPacket.data() + PACKET_HEADER_SIZE + realPayloadSize,
+                      0, payloadSize - realPayloadSize);
         }
+        _sendProducer.push(std::move(sendPacket));
+
       }
-      //   for (int i = 0; i < 30; i++) {
-      //   std::cout  <<  static_cast<int>(_sendProducer.front()[i+16]) << " , ";
-      //  //std::cout << static_cast<int>(_sendProducer.back()[i * 2 + 1]) << ")";
-
-      // }
-      // printWithColor("blue",
-      //                "This is main thread total packets number: ", totalPackets,
-      //                "  packets");
-      // std::cout << "This is main thread total packets number: " << totalPackets
-      //           << "  packets" << std::endl;
-
-      // 加入队列
+ 
       //NOTE:在wsl已测试每次传输一个prt不会发生两个prt以上发送情况，如果严格要求一次发一个prt则，直接加锁而不是尝试加锁
-      {
-        std::unique_lock<std::mutex> lock(
-            _sendMutex,
-            std::try_to_lock);  // 在两个队列交换数据时尝试加锁
-        if (lock.owns_lock()) {
+    
+      // if (j ==2||j==5||j==8) {
+      //   continue;
+      // }
 
-        //int j =0;
+      {  //fixme：把这里改成阻塞
+        std::unique_lock<std::mutex> lock(
+            _sendMutex, std::try_to_lock);  // std::lock_guard<std::mutex> lock(
+                                            // _sendMutex);
+        // 在两个队列交换数据时尝试加锁
+        if (lock.owns_lock()) {
           while (!_sendProducer.empty()) {
             _sendConsumer.push(
                 std::move(_sendProducer.front()));  //数据所有权归消费者队列
             _sendProducer.pop();
 
-              // for (; j < 1; j++){
-              //     for (int i = 0; i < 10; i++) {
-              //       std::cout << "("
-              //                 << static_cast<int>(_sendProducer.front()[i * 2])
-              //                 << " , ";
-              //       std::cout
-              //           << static_cast<int>(_sendProducer.front()[i * 2 + 1])
-              //           << ")";
-              //     }
-              //   }
           }
           _sendCondition.notify_one();
         }
+        }
       }
-    }
-
-    //std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   _sendCondition.notify_all();
@@ -471,11 +531,12 @@ void* Server::recvDataFromClient(void* arg) {
   auto* args = static_cast<std::tuple<CommunicationInfo&>*>(arg);
   CommunicationInfo& info = std::get<0>(*args);
   try {
-    Socket recvSocket(AF_INET, SOCK_DGRAM, 0);
-    recvSocket.configureSocket(info.localRecvPort, Socket::RECV);
+    Socket recvSocket(AF_INET, info.protocolType, Socket::RECV, 0);
+    recvSocket.configureSocket(info.localRecvPort, _isRunning[0]);
     fd_set readfds;
     struct timeval timeout;
-    std::unique_ptr<char[]> _recvbuf = std::make_unique<char[]>(APP_BUF_SIZE);
+    std::unique_ptr<char[]> _recvbuf =
+        std::make_unique<char[]>(recvSocket.getAppBufSize());
     if (!_recvbuf) {
       throw ServerException("Alloc recvbuf failed" +
                             std::string(strerror(errno)));
@@ -505,8 +566,9 @@ void* Server::recvDataFromClient(void* arg) {
         continue;  // 超时不处理，继续检查 isRunning
       }
       if (FD_ISSET(recvSocket.getFd(), &readfds)) {
-        ssize_t recvBytes = recvfrom(recvSocket.getFd(), _recvbuf.get(),
-                                     APP_BUF_SIZE - 1, 0, nullptr, nullptr);
+        ssize_t recvBytes =
+            recvfrom(recvSocket.getFd(), _recvbuf.get(),
+                     recvSocket.getAppBufSize(), 0, nullptr, nullptr);
         if (recvBytes > 0) {
           _recvbuf[recvBytes] = '\0';
           std::cout << "Received result from client: " << _recvbuf.get()
@@ -568,7 +630,7 @@ void* Server::recvDataFromClient(void* arg) {
  */
 
 void* Server::recvThreadFunction(void* arg) {
-  instance->recvDataFromClient(arg);
+  //instance->recvDataFromClient(arg);
   return nullptr;
 }
 
@@ -626,7 +688,23 @@ void Server::start() {
     ThreadManager::bindThreadToCore(recvThreads[i], _coreIds[i]);
     ThreadManager::printfThreadInfo(recvThreads[i]);
 
-    shardData();
+    if (_clientInfos[i].protocolType == Socket::TCP) {
+
+      while ( _isRunning[0]) {
+        if (_isTcpConnected) {
+          // 如果TCP连接已经建立，生成数据
+          shardData();
+          break;  // 生成数据后跳出循环
+        } else {
+          // 如果TCP连接未建立，等待一段时间
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(100));  // 休眠100ms
+        }
+      }
+
+    } else if (_clientInfos[i].protocolType == Socket::UDP) {
+      shardData();
+    }
   }
 
   // for (auto& thread : sendThreads) {

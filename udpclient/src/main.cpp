@@ -23,6 +23,7 @@
 #include <iostream>
 #include "Client.hpp"
 #include "SignalProcess.hpp"
+#include "Socket.hpp"
 #include "ThreadManager.hpp"
 
 Client* Client::instance = nullptr;
@@ -32,7 +33,7 @@ int Thread::generateId_ = 0;
 int main() {
   try {
      ThreadManager::bindThreadToCore(pthread_self(), 0);  //主线程绑定核心
-     Client client({{0, "172.29.183.243  ", 8011, 8003, 8001}});
+     Client client({{0, "172.29.183.243",Socket::TCP, 8011, 8003, 8001}});
      Client::instance = &client;  // 将实例指针传递给静态变量
      client.setPrintFlag(0, true);
      //std::cout << sizeof(UdpHeader) << std::endl;

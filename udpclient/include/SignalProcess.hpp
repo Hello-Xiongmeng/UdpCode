@@ -11,18 +11,18 @@
 #include "ThreadPool.hpp"
 #include "Socket.hpp"
 
-#define BWin 0
-#define SWin 0
+#define BWin 1
+#define SWin 1
 #define C 3e8
-#define RF 0
+#define RF 1
 #define Lambda C / RF
-#define Fs 0
+#define Fs 1
 #define Ts 1 / Fs
 #define pi 3.1415926535
-#define Pfa 0
-#define th 0
-#define th_db 0
-#define CPI_Num 4
+#define Pfa 1
+#define th 1
+#define th_db 1
+#define CPI_Num 1
 
 struct MyStruct {
   Eigen::VectorXf result_d_n;
@@ -32,7 +32,7 @@ struct MyStruct {
 
 // 模拟接收到的分片数据包
 struct ReceivedPacket {
-  UdpHeader header;
+  Header header;
   std::vector<char> payload;  // 数据负载
 };
 
