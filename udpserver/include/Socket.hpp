@@ -23,18 +23,22 @@ struct Header {
   uint16_t sequence = 0;   // 分片序号
   uint16_t total = 0;      // 总分片数
 };
-
+struct TcpHeader {
+  uint64_t timeStamp = 0;  // 时间戳 (组序号)
+  uint32_t totalDataSize;  // 包的总大小（包含包头和数据部分）
+};
 constexpr int MTU = 9000;
 constexpr int IP_HEADER_SIZE = 20;
 constexpr int UDP_HEADER_SIZE = 8;
 constexpr int TCP_HEADER_SIZE = 20;
 
-constexpr int PACKET_HEADER_SIZE = sizeof(Header);
+constexpr int UDP_PACKET_HEADER_SIZE = sizeof(Header);
+constexpr int TCP_PACKET_HEADER_SIZE = sizeof(TcpHeader);
 
 constexpr int UDP_PAYLOAD_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE -
-                                 PACKET_HEADER_SIZE;  //1468，真实数据的大小
+                                 UDP_PACKET_HEADER_SIZE;  //1468，真实数据的大小
 constexpr int TCP_PAYLOAD_SIZE = MTU - IP_HEADER_SIZE - TCP_HEADER_SIZE -
-                                 PACKET_HEADER_SIZE;  //1468，真实数据的大小
+                                 TCP_PACKET_HEADER_SIZE;  //1468，真实数据的大小
 
 constexpr int UDP_APP_BUF_SIZE = MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE;
 constexpr int TCP_APP_BUF_SIZE = MTU - IP_HEADER_SIZE - TCP_HEADER_SIZE;

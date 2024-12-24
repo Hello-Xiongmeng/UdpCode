@@ -31,8 +31,12 @@ struct MyStruct {
 };
 
 // 模拟接收到的分片数据包
-struct ReceivedPacket {
+struct udpReceivedPacket {
   Header header;
+  std::vector<char> payload;  // 数据负载
+};
+struct tcpReceivedPacket {
+  TcpHeader header;
   std::vector<char> payload;  // 数据负载
 };
 
@@ -58,16 +62,19 @@ class SignalProcess {
 
   ~SignalProcess();
 
-  void start(std::atomic<bool>& processFlag);
+  void start(std::atomic<bool>& processFla,Socket::ProtocolType protocolType);
 
   void processData(prtPacket&& prt);
 
   std::queue<std::vector<char>>& _consumerQueue;
 
-  std::queue<prtPacket> checkMissingPackets(
-      std::vector<ReceivedPacket>& recvPackets,
-      std::vector<uint64_t>& missTimeFlag,
-      std::queue<prtPacket>& validPackets);
+  void checkMissingPackets(std::vector<std::vector<char>>& recvPackets,
+                           std::vector<uint64_t>& missTimeFlag,
+                           std::queue<prtPacket>& validPackets);
+
+  void checkMissingPacketsForTcp(
+      std::vector<std::vector<char>>& recvPackets,
+      std::vector<uint64_t>& missTimeFlag, std::queue<prtPacket>& validPackets);
 
   void convertTimestamp(uint64_t timestamp);
 

@@ -108,9 +108,11 @@ class Client {
 
   void* sendDataToServer(void* arg);
 
-  void* recvDataFromServer(void* arg);
+  void* recvFromServerTcp(void* arg);
 
-  static void* sendThreadFunction(void* arg);
+  void* recvFromServerUdp(void* arg);
+
+      static void* sendThreadFunction(void* arg);
 
   static void* recvThreadFunction(void* arg);
 

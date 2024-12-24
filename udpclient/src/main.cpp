@@ -32,18 +32,21 @@ int Thread::generateId_ = 0;
 /// bug:等待在条件上的线程怎么回收
 int main() {
   try {
-     ThreadManager::bindThreadToCore(pthread_self(), 0);  //主线程绑定核心
-     Client client({{0, "172.29.183.243",Socket::TCP, 8011, 8003, 8001}});
-     Client::instance = &client;  // 将实例指针传递给静态变量
-     client.setPrintFlag(0, true);
-     //std::cout << sizeof(UdpHeader) << std::endl;
 
-     //std::cout << sizeof(uint64_t)+sizeof(uint16_t)*2 << std::endl;
+    ThreadManager::bindThreadToCore(pthread_self(), 0);  //主线程绑定核心
+                                                         //192.168.6.1
 
-       client.start(
+    Client client({{0, "172.24.175.169  ", Socket::TCP, 8011, 8003, 8001}});
+    Client::instance = &client;  // 将实例指针传递给静态变量
+    client.setPrintFlag(0, true);
+    //std::cout << sizeof(UdpHeader) << std::endl;
 
-       );
-     getchar();
+    //std::cout << sizeof(uint64_t)+sizeof(uint16_t)*2 << std::endl;
+
+    client.start(
+
+    );
+    getchar();
   } catch (const ClientException& e) {
     std::cerr << e.what() << '\n';
   } catch (const std::system_error& e) {  //系统级别的错误

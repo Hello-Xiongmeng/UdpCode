@@ -238,52 +238,36 @@ void* Client::sendDataToServer(void* arg) {
   return nullptr;
 }
 
-void* Client::recvDataFromServer(void* arg) {
+void* Client::recvFromServerTcp(void* arg) {
 
   auto* args = static_cast<std::tuple<CommunicationInfo&>*>(arg);
   auto& info = std::get<0>(*args);
   try {
     Socket recvSocket(AF_INET, info.protocolType, Socket::RECV, 0);
-
+    size_t maxPacketSize = 180 * 3260 * 2 * sizeof(float) +
+                           sizeof(TcpHeader);  // 最大包大小 + 包头
     std::unique_ptr<int> newRecvSocket;
-
-    if (info.protocolType == Socket::TCP) {
-
-      newRecvSocket = std::make_unique<int>(
-          recvSocket.configureSocket(info.localRecvPort, _isRunning[0]));
-
-    } else if (info.protocolType == Socket::UDP) {
-
-      recvSocket.configureSocket(info.localRecvPort, _isRunning[0]);
-      newRecvSocket = std::make_unique<int>(recvSocket.getFd());
-    }
-
+    std::vector<char> recvBuf = std::vector<char>(maxPacketSize);
+    newRecvSocket = std::make_unique<int>(
+        recvSocket.configureSocket(info.localRecvPort, _isRunning[0]));
     fd_set readfds;
     struct timeval timeout;
     unsigned long recvCount = 0;
-    uint16_t packets;
-    uint16_t oldPackets;
     int64_t timeStamp;
-    int64_t oldTimeStamp;
-    std::vector<char> recvBuf;
+    int64_t printTimeStamp;
     ssize_t recvBytes = 0;
-    ssize_t oldRecvBytes = 0;
-
-    //NOTE:在循环之外定义循环内使用的对象和变量提高性能，避免重复定义
-    //
+    std::vector<char> tempBuffer;  // 用于拼接接收到的数据
+    uint32_t totalDataSize = 0;
     // 标志位，确保只处理一次 "READY" 和 "OK"
     bool handshakeDone = false;
+    bool headerReceived = false;
 
     while (getRunnFlag(info.serverId)) {
-      //fflush(stdout);  //刷新流 stream 的输出缓冲区。
-      //设置超时为 1 秒
       timeout.tv_sec = 0;
       timeout.tv_usec =
           _timeOut * 1000;  //微秒数 tv_usec 必须在 0 到 999,999 之间
       FD_ZERO(&readfds);
       FD_SET(*newRecvSocket, &readfds);
-      //使用 select 来轮询接收套接字
-      //如果没有数据会在select阻塞一定的时间，超时进入下一次循环,继续检查
       int ret =
           select(*newRecvSocket + 1, &readfds, nullptr, nullptr, &timeout);
       if (ret == -1) {
@@ -297,7 +281,7 @@ void* Client::recvDataFromServer(void* arg) {
         continue;  // 超时不处理，继续检查 isRunning
       }
       if (FD_ISSET(*newRecvSocket, &readfds)) {
-        if (!handshakeDone && info.protocolType == Socket::TCP) {
+        if (!handshakeDone) {
           char buffer[256];  // 收到数据
           ssize_t received = recv(*newRecvSocket, buffer, sizeof(buffer), 0);
 
@@ -313,7 +297,6 @@ void* Client::recvDataFromServer(void* arg) {
               break;
             }
           }
-
           std::string receivedMsg(buffer, received);
           if (!handshakeDone && receivedMsg == "READY") {
             // 收到 "READY" 消息，表示发送端准备好了
@@ -337,113 +320,174 @@ void* Client::recvDataFromServer(void* arg) {
           }
         } else {
 
-          ///fixme:需要每次开辟吗，直接开辟足够使用的内存
-          recvBuf = std::vector<char>(recvSocket.getAppBufSize());
-          //std::vector 内部的数据是动态分配的，通常是在堆上进行分配
-
-          if (info.protocolType == Socket::UDP) {
-            oldRecvBytes = recvBytes;
-            recvBytes =
-                recvfrom(*newRecvSocket, recvBuf.data(),
-                         recvSocket.getAppBufSize(), 0, nullptr, nullptr);
-          } else if (info.protocolType == Socket::TCP) {
-
-            // 接受连接后，使用新的套接字进行数据接收
-            oldRecvBytes = recvBytes;
-
-            recvBytes = recv(*newRecvSocket, recvBuf.data(),
-                             recvSocket.getAppBufSize(), 0);
-            if (recvBytes < 0) {
-              throw ClientException("Failed to receive data from server: " +
-                                    std::string(strerror(errno)));
-            }
-          }
+          recvBytes = recv(*newRecvSocket, recvBuf.data(), recvBuf.size(), 0);
 
           if (recvBytes > 0) {
+             //   std::cout << "Received " << recvBytes << " bytes of data." << std::endl;
+            // 将接收到的数据插入到 tempBuffer 中
+            tempBuffer.insert(tempBuffer.end(), recvBuf.begin(),
+                              recvBuf.begin() + recvBytes);
 
-            if (getPrintFlag(info.serverId) == false) {
+            // 如果包头还没有接收完整，则继续接收
+            if (tempBuffer.size() < TCP_PACKET_HEADER_SIZE) {
+              std::cout << "Received partial header, waiting for more data..."
+                        << std::endl;
+              continue;  // 等待更多数据到来
+            }
 
-              recvCount = 0;
-              info.recvLen = 0;
+            // 解析包头（只在接收到完整的包头后进行）
+            if (!headerReceived) {
+              TcpHeader header;
+              memcpy(&header, tempBuffer.data(), sizeof(TcpHeader));
+              timeStamp = header.timeStamp;
+              totalDataSize =
+                  header.totalDataSize;  // 有效负载数据大小，不包括包头
 
-            } else if (getPrintFlag(info.serverId) == true) {
+              // 标记包头已经接收完毕
+              headerReceived = true;
 
-              recvCount++;
-              info.recvLen += recvBytes;
-
-              if (recvCount == 1) {
-
-                gettimeofday(&info.recvApiStart, NULL);
-
-              } else {
-
-                if (recvCount >= _printLimit) {
-
-                  gettimeofday(&info.recvApiEnd, NULL);
-                  auto consumeTime =
-                      getExecutionTime(info.recvApiStart, info.recvApiEnd);
-                  std::cout << "Thread " << std::this_thread::get_id()
-                            << " bandwidth is :"
-                            << (double)(info.recvLen) * 8 * 1000000 / 1024 /
-                                   1024 / 1024 / consumeTime
-                            << "Gb / s" << std::endl;
-                  recvCount = 0;
-                  info.recvLen = 0;
-                  consumeTime = 0;
-                }
+              // 如果接收到的字节数小于包的总数据大小，说明数据不完整
+              if (tempBuffer.size() < totalDataSize + TCP_PACKET_HEADER_SIZE) {
+                std::cout << "Received partial data, waiting for more data..."
+                          << std::endl;
+                continue;  // 等待更多数据到来
               }
             }
-
-   
-            //FIXME:这里的需要考虑结构体的内存对齐问题吗
-            memcpy(&timeStamp, recvBuf.data(), sizeof(uint64_t));
-
-            //第一次接收时，或者已经清空之后第一次接收时，时间戳给相同的值
-            if (_producerQueue.empty()) {
-              oldTimeStamp = timeStamp;
-              convertTimestamp(timeStamp);
-            }
-
-            if (timeStamp != oldTimeStamp) {
-              convertTimestamp(timeStamp);
-
-              //std::unique_lock<std::mutex> lock(_queueMutex);
-              std::unique_lock<std::mutex> lock(_queueMutex, std::try_to_lock);
-              // 在两个队列交换数据时尝试加锁
-              if (lock.owns_lock()) {
-
-                printWithColor("yellow",
-                               "ProducerQueue:", _producerQueue.size(),
-                               "packets");
-                while (!_producerQueue.empty()) {
-                 
-
-                  _consumerQueue.push(std::move(_producerQueue.front()));
-                  _producerQueue.pop();
-
-                }
-
-                _queueCondition.notify_one();
-
+            // 处理数据包：接收完整的包头之后继续接收数据
+            while (tempBuffer.size() < totalDataSize + TCP_PACKET_HEADER_SIZE) {
+              // 如果接收到的字节数还不足以构成完整的数据包，继续接收
+              recvBytes =
+                  recv(*newRecvSocket, recvBuf.data(), recvBuf.size(), 0);
+              if (recvBytes <= 0) {
+                std::cerr << "Error receiving data or connection closed."
+                          << std::endl;
+                break;  // 退出接收循环，错误处理
               }
 
-              oldTimeStamp = timeStamp ;
+              // 将接收到的数据继续插入到 tempBuffer 中
+              tempBuffer.insert(tempBuffer.end(), recvBuf.begin(),
+                                recvBuf.begin() + recvBytes);
             }
 
-            //如果时间戳变了，锁住_consumerQueue，交换数据，时间戳不变一直往队列里放数据
-            _producerQueue.push(std::move(recvBuf));
+            // 如果接收到的数据总字节数大于等于 totalDataSize + TCP_HEADER_SIZE
+            if (tempBuffer.size() > totalDataSize + TCP_PACKET_HEADER_SIZE) {
 
-            ///fixme： _batchSize 要合理设置大小，才能提高接受效率
-            ///NOTE:保证每次接收一个prt合并之后交给处理线程,如果丢包这个逻辑还成立吗
+              std::vector<char> payload(
+                  tempBuffer.begin() ,
+                  tempBuffer.begin() + TCP_PACKET_HEADER_SIZE + totalDataSize);
 
-          } else {
+              tempBuffer.erase(tempBuffer.begin(),
+                               tempBuffer.begin() +
+                                   (totalDataSize + TCP_PACKET_HEADER_SIZE));
+              // 剩余数据部分：如果有多余的数据，则保存这些数据，等待下一个包的接收
+              size_t remainingDataSize =
+                  tempBuffer.size() - (totalDataSize + TCP_PACKET_HEADER_SIZE);
+              // 处理数据负载
+              printWithColor("red", "不完整的包");
 
+              _producerQueue.push(std::move(payload));
+             
+            
+            
+
+              // 清空相关变量
+              headerReceived = false;
+              timeStamp = 0;  
+              totalDataSize = 0;
+            } else if (tempBuffer.size() ==
+                       totalDataSize + TCP_PACKET_HEADER_SIZE) {
+printWithColor("yellow", "收取完整的包")   ;
+              _producerQueue.push(std::move(tempBuffer));
+              tempBuffer.clear();
+              headerReceived = false;
+              timeStamp = 0;
+              totalDataSize = 0;
+            }
+
+          // if (getPrintFlag(info.serverId) == false) {
+
+          //   recvCount = 0;
+          //   info.recvLen = 0;
+
+          // } else if (getPrintFlag(info.serverId) == true) {
+
+          //   recvCount++;
+          //   info.recvLen += recvBytes;
+
+          //   if (recvCount == 1) {
+
+          //     gettimeofday(&info.recvApiStart, NULL);
+
+          //   } else {
+
+          //     if (recvCount >= _printLimit) {
+
+          //       gettimeofday(&info.recvApiEnd, NULL);
+          //       auto consumeTime =
+          //           getExecutionTime(info.recvApiStart, info.recvApiEnd);
+          //       std::cout << "Thread " << std::this_thread::get_id()
+          //                 << " bandwidth is :"
+          //                 << (double)(info.recvLen) * 8 * 1000000 / 1024 /
+          //                        1024 / 1024 / consumeTime
+          //                 << "Gb / s" << std::endl;
+          //       recvCount = 0;
+          //       info.recvLen = 0;
+          //       consumeTime = 0;
+          //     }
+          //   }
+          // }
+          }
+
+          else {
             throw ClientException("Failed to receive data from server" +
                                   std::string(strerror(errno)));
           }
+          
+          // std::vector<char> payload(recvBuf.begin(),
+          //                           recvBuf.begin() + recvBytes);
+          // memcpy(&timeStamp, payload.data(), sizeof(uint64_t));
+
+          // //第一次接收时，或者已经清空之后第一次接收时，时间戳给相同的值
+          // if (_producerQueue.empty()) {
+          //   oldTimeStamp = timeStamp;
+          //   convertTimestamp(timeStamp);
+          // }
+
+          // if (timeStamp != oldTimeStamp) {
+          //   convertTimestamp(timeStamp);
+
+            //std::unique_lock<std::mutex> lock(_queueMutex);
+
+          {
+            std::unique_lock<std::mutex> lock(_queueMutex, std::try_to_lock);
+            // 在两个队列交换数据时尝试加锁
+            if (lock.owns_lock()) {
+
+              // printWithColor("yellow", "ProducerQueue:", _producerQueue.size(),
+              //                "packets");
+              while (!_producerQueue.empty()) {
+
+                memcpy(&printTimeStamp, _producerQueue.front().data(),
+                       sizeof(uint64_t));
+
+               convertTimestamp(printTimeStamp);
+
+                _consumerQueue.push(std::move(_producerQueue.front()));
+                _producerQueue.pop();
+              }
+
+              _queueCondition.notify_one();
+            }
+         }
+          //   oldTimeStamp = timeStamp;
+          // }
+
+          //如果时间戳变了，锁住_consumerQueue，交换数据，时间戳不变一直往队列里放数据
+
+          ///fixme： _batchSize 要合理设置大小，才能提高接受效率
+          ///NOTE:保证每次接收一个prt合并之后交给处理线程,如果丢包这个逻辑还成立吗
         }
-      }
-    }
+    }  
 
     // 确保在循环结束后，将剩余的数据也存入队列
     if (!_producerQueue.empty()) {
@@ -456,12 +500,179 @@ void* Client::recvDataFromServer(void* arg) {
       _queueCondition.notify_one();
       //batchData.clear();
     }
+    }
+  } catch (const SocketException& e) {
+    std::cerr << "Socket exception occurred: " << e.what() << std::endl;
+  } catch (const ClientException& e) {
+    //无论被异常终止还是手动终止都表示接收完成
+    std::cerr << "CLient exception occurred: " << e.what() << std::endl;
+  } catch (const std::system_error& e) {  //系统级别的错误
+    std::cerr << "System error occurred: " << e.what() << std::endl;
+  } catch (const std::exception& e) {  //其他标准异常
+    std::cerr << "Exception occurred: " << e.what() << std::endl;
+  } catch (...) {  //所有其他未知类型的异常
+    std::cerr << "An unknown error occurred during sending data." << std::endl;
+  }
+
+  if (getRunnFlag(info.serverId) == false) {
+    std::cout << "Recving has been stopped by setting isRunning" << std::endl;
+  } else {
+    std::cout << "Recving has been stopped by catching exception" << std::endl;
+  }
+  cleanup();
+  _queueCondition.notify_all();  // 接收循环已经退出，通知等待线程，唤醒
+
+  return nullptr;
+}
+void* Client::recvFromServerUdp(void* arg) {
+
+  auto* args = static_cast<std::tuple<CommunicationInfo&>*>(arg);
+  auto& info = std::get<0>(*args);
+  try {
+    Socket recvSocket(AF_INET, info.protocolType, Socket::RECV, 0);
+
+    std::vector<char> recvBuf ;
+
+    recvSocket.configureSocket(info.localRecvPort, _isRunning[0]);
+
+    fd_set readfds;
+    struct timeval timeout;
+    unsigned long recvCount = 0;
+    int64_t timeStamp;
+    int64_t oldTimeStamp;
+    ssize_t recvBytes = 0;
+    ssize_t oldRecvBytes = 0;
+
+    //NOTE:在循环之外定义循环内使用的对象和变量提高性能，避免重复定义
+    //
+    while (getRunnFlag(info.serverId)) {
+      //fflush(stdout);  //刷新流 stream 的输出缓冲区。
+      //设置超时为 1 秒
+      timeout.tv_sec = 0;
+      timeout.tv_usec =
+          _timeOut * 1000;  //微秒数 tv_usec 必须在 0 到 999,999 之间
+      FD_ZERO(&readfds);
+      FD_SET(recvSocket.getFd(), &readfds);
+      //使用 select 来轮询接收套接字
+      //如果没有数据会在select阻塞一定的时间，超时进入下一次循环,继续检查
+      int ret =
+          select(recvSocket.getFd() + 1, &readfds, nullptr, nullptr, &timeout);
+      if (ret == -1) {
+        throw ClientException(
+            "the select function in recvDataFromserver function " +
+            std::string(strerror(errno)));
+        break;
+      } else if (ret == 0) {
+        //如果 select 超时，检查是否需要停止接收
+        //std::cout << "Timeout, no data received." << std::endl;
+        continue;  // 超时不处理，继续检查 isRunning
+      }
+
+      if (FD_ISSET(recvSocket.getFd(), &readfds)) {
+        ///fixme:需要每次开辟吗，直接开辟足够使用的内存
+        //std::vector 内部的数据是动态分配的，通常是在堆上进行分配
+
+        recvBuf = std::vector<char>(recvSocket.getAppBufSize());
+        recvBytes = recvfrom(recvSocket.getFd(), recvBuf.data(), recvBuf.size(),
+                             0, nullptr, nullptr);
+       // std::cout << recvBytes << std::endl;
+
+        if (recvBytes > 0) {
+          oldRecvBytes = recvBytes;// 可以识别最后一包的具体大小
+
+          if (getPrintFlag(info.serverId) == false) {
+
+            recvCount = 0;
+            info.recvLen = 0;
+
+          } else if (getPrintFlag(info.serverId) == true) {
+
+            recvCount++;
+            info.recvLen += recvBytes;
+
+            if (recvCount == 1) {
+
+              gettimeofday(&info.recvApiStart, NULL);
+
+            } else {
+
+              if (recvCount >= _printLimit) {
+
+                gettimeofday(&info.recvApiEnd, NULL);
+                auto consumeTime =
+                    getExecutionTime(info.recvApiStart, info.recvApiEnd);
+                std::cout << "Thread " << std::this_thread::get_id()
+                          << " bandwidth is :"
+                          << (double)(info.recvLen) * 8 * 1000000 / 1024 /
+                                 1024 / 1024 / consumeTime
+                          << "Gb / s" << std::endl;
+                recvCount = 0;
+                info.recvLen = 0;
+                consumeTime = 0;
+              }
+            }
+          }
+
+          //FIXME:这里的需要考虑结构体的内存对齐问题吗
+          memcpy(&timeStamp, recvBuf.data(), sizeof(uint64_t));
+
+          //第一次接收时，或者已经清空之后第一次接收时，时间戳给相同的值
+          if (_producerQueue.empty()) {
+            oldTimeStamp = timeStamp;
+            convertTimestamp(timeStamp);
+          }
+
+          if (timeStamp != oldTimeStamp) {
+            convertTimestamp(timeStamp);
+
+            //std::unique_lock<std::mutex> lock(_queueMutex);
+            std::unique_lock<std::mutex> lock(_queueMutex, std::try_to_lock);
+            // 在两个队列交换数据时尝试加锁
+            if (lock.owns_lock()) {
+
+              printWithColor("yellow", "ProducerQueue:", _producerQueue.size(),
+                             "packets");
+              while (!_producerQueue.empty()) {
+
+                _consumerQueue.push(std::move(_producerQueue.front()));
+                _producerQueue.pop();
+
+              }
+
+              _queueCondition.notify_one();
+            }
+
+            oldTimeStamp = timeStamp;
+          }
+        //  如果时间戳变了，锁住_consumerQueue，交换数据，时间戳不变一直往队列里放数据
+          _producerQueue.push(std::move(recvBuf));
+
+        } else {
+
+          throw ClientException("Failed to receive data from server" +
+                                std::string(strerror(errno)));
+        }
+      }
+    }
+    // 确保在循环结束后，将剩余的数据也存入队列
+    if (!_producerQueue.empty()) {
+      std::lock_guard<std::mutex> lock(_queueMutex);
+      while (!_producerQueue.empty()) {
+
+        _consumerQueue.push(std::move(_producerQueue.front()));
+        _producerQueue.pop();
+
+      }
+      // lock.unlock();  //显式释放锁
+      _queueCondition.notify_one();
+      //batchData.clear();
+    }
 
   } catch (const SocketException& e) {
     std::cerr << "Socket exception occurred: " << e.what() << std::endl;
   } catch (const ClientException& e) {
     //无论被异常终止还是手动终止都表示接收完成
-    std::cerr << "Server exception occurred: " << e.what() << std::endl;
+    std::cerr << "Client exception occurred: " << e.what() << std::endl;
   } catch (const std::system_error& e) {  //系统级别的错误
     std::cerr << "System error occurred: " << e.what() << std::endl;
   } catch (const std::exception& e) {  //其他标准异常
@@ -487,7 +698,15 @@ void* Client::sendThreadFunction(void* arg) {
 }
 
 void* Client::recvThreadFunction(void* arg) {
-  instance->recvDataFromServer(arg);
+  auto* args = static_cast<std::tuple<CommunicationInfo&>*>(arg);
+  auto& info = std::get<0>(*args);
+
+  if (info.protocolType == Socket::TCP) {
+    instance->recvFromServerTcp(arg);
+  } else if (info.protocolType == Socket::UDP) {
+    instance->recvFromServerUdp(arg);
+  }
+
   return nullptr;
 }
 
@@ -525,7 +744,7 @@ void Client::start() {
     ThreadManager::bindThreadToCore(recvThreads[i], _coreIds[i]);
     ThreadManager::printfThreadInfo(recvThreads[i]);
 
-    signalProcess.start(_isRunning[0]);
+    signalProcess.start(_isRunning[0],_serverInfos[i].protocolType);
   }
 }
 

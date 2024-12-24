@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.15)#指定最小cmake版本
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-project(UdpClient)#指定项目名称
+project(Client)#指定项目名称
 
 set(CMAKE_CXX_STANDARD 17)
 

@@ -93,9 +93,9 @@ class Server {
 
   bool getPrintFlag(uint16_t clientId);
 
-  void setRunnFlag(uint16_t clientId, bool flag);
+  void setRunFlag(uint16_t clientId, bool flag);
 
-  bool getRunnFlag(uint16_t clientId);
+  bool getRunFlag(uint16_t clientId);
 
   void printClientInfo(const uint16_t& clientId);
 
@@ -118,7 +118,9 @@ class Server {
 
   void shardData();
 
-  void* recvDataFromClient(void* arg);
+  void   shardDataForTcp();
+
+      void* recvDataFromClient(void* arg);
 
   static void* sendThreadFunction(void* arg);
 

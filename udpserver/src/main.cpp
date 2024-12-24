@@ -20,9 +20,14 @@
  */
 //#include <boost/format.hpp>
 #include "ChangePrint.hpp"
+#include <Eigen/Dense>
 #include "Socket.hpp"
 #include "ThreadManager.hpp"
 #include "Server.hpp"
+#include "ReadData.hpp"  // Include the header file for Data_read
+
+#define fftLength 4096
+
 enum ProcessingBoard {
   Board_1,  // 默认为 0
   Board_2,  // 默认为 1
@@ -42,13 +47,73 @@ int main() {
     ThreadManager::bindThreadToCore(pthread_self(),
                                     0);  //主线程绑定核心,设置线程属性
     ThreadManager::setThreadAttributes(mainAttr, 90, 1024 * 1024);
-
-    Server server({{0, "172.29.183.243 ",Socket::TCP, 8001, 8002, 8011}});
+//192.168.6.2
+    Server server({{0, "172.24.175.169 ", Socket::TCP, 8001, 8002, 8011}});
     Server::instance = &server;  // 将实例指针传递给静态变量
     server.setPrintFlag(0, true);
     server.start();
+
+    ReadData a;
+    Eigen::VectorXf TotalNumber = a.readData("TotalNumber.dat");
+    Eigen::VectorXf SamepleNumber = a.readData("SampleNumber.dat");
+    Eigen::VectorXf phi2 = a.readData("phi2.dat");
+    Eigen::VectorXf K_Phasefw = a.readData("K_Phasefw.dat");
+    Eigen::VectorXf K_Phasefy = a.readData("K_Phasefy.dat");
+    Eigen::VectorXcf Chirp = a.readData("Chirp_real.dat", "Chirp_imag.dat");
+    Eigen::VectorXcf data_Xs = a.readData("Xs_real.dat", "Xs_imag.dat");
+    Eigen::VectorXcf data_Xs_w = a.readData("Xfw_real.dat", "Xfw_imag.dat");
+    Eigen::VectorXcf data_Xs_y = a.readData("Xfy_real.dat", "Xfy_imag.dat");
+    Eigen::VectorXcf data_Xs_slb =
+        a.readData("Xs_sub_real.dat", "Xs_sub_imag.dat");
+    std::vector<Eigen::MatrixXcf> cpiVector, cpiVector_w, cpiVector_y,
+        cpiVector_slb;
+
+    unsigned int TotalNumberCount = 0;
+    for (size_t i = 0; i < TotalNumber.size(); i++) {
+
+      Eigen::MatrixXcf echoMatrix((int)(TotalNumber[i] / SamepleNumber[i]),
+                                  (int)(SamepleNumber[i]));
+
+      Eigen::MatrixXcf echoMatrix_w((int)(TotalNumber[i] / SamepleNumber[i]),
+                                    (int)(SamepleNumber[i]));
+
+      Eigen::MatrixXcf echoMatrix_y((int)(TotalNumber[i] / SamepleNumber[i]),
+                                    (int)(SamepleNumber[i]));
+      
+      Eigen::MatrixXcf echoMatrix_slb((int)(TotalNumber[i] / SamepleNumber[i]),
+                                      (int)(SamepleNumber[i]));
+      
+      for (int k = 0; k < echoMatrix.rows(); k++) {
+        echoMatrix.row(k) = data_Xs.segment(
+            SamepleNumber[i] * k + TotalNumberCount, SamepleNumber[i]);
+        echoMatrix_w.row(k) = data_Xs_w.segment(
+            SamepleNumber[i] * k + TotalNumberCount, SamepleNumber[i]);
+        echoMatrix_y.row(k) = data_Xs_y.segment(
+            SamepleNumber[i] * k + TotalNumberCount, SamepleNumber[i]);
+        echoMatrix_slb.row(k) = data_Xs_slb.segment(
+            SamepleNumber[i] * k + TotalNumberCount, SamepleNumber[i]);
+      }
+      TotalNumberCount += TotalNumber[i];
+      cpiVector.push_back(echoMatrix);
+      cpiVector_w.push_back(echoMatrix_w);
+      cpiVector_y.push_back(echoMatrix_y);
+      cpiVector_slb.push_back(echoMatrix_slb);
+    }
+
+    std::vector<std::vector<float>> targ_result_dis(4);
+    std::vector<std::vector<float>> targ_result_vel(4);
+
+    Eigen::Vector4f PRT = {163 * 1e-6, 151 * 1e-6, 135 * 1e-6, 127 * 1e-6};
+    Eigen::Vector4f PRF = 1 / PRT.array();
+
+    // DataProcess operationCpi(fftLength);
+
+    
     printWithColor("green", "Program exited normally.");
 
+
+
+    
     // 获取当前时间戳作为组序号
     // uint64_t timestamp =
     //     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();

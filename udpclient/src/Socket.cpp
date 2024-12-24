@@ -4,11 +4,11 @@
 
 Socket::Socket(int domain, ProtocolType protocolType, SocketMode socketMode,
                int protocol)
-    : 
-      _coreRecvBufSize(CORE_BUF_SIZE),
+    : _coreRecvBufSize(CORE_BUF_SIZE),
       _coreSendBufSize(CORE_BUF_SIZE),
       _protocolType(protocolType),
       _socketMode(socketMode),
+      //enp12s0f1
       _ifName("eth0") {
   int type = (_protocolType == TCP) ? SOCK_STREAM : SOCK_DGRAM;
   _appBufSize = (_protocolType == TCP) ? TCP_APP_BUF_SIZE : UDP_APP_BUF_SIZE;

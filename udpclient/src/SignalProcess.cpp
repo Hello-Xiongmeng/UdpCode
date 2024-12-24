@@ -27,11 +27,11 @@ SignalProcess::SignalProcess(std::queue<std::vector<char>>& consumerQueue,
 
 SignalProcess::~SignalProcess() {}
 
-void SignalProcess::start(std::atomic<bool>& isRunningFlag) {
+void SignalProcess::start(std::atomic<bool>& isRunningFlag ,
+                          Socket::ProtocolType protocolType) {
 
+  std::vector<std::vector<char>> recvPackets;
 
-
-  std::vector<ReceivedPacket> recvPackets;
   std::queue<prtPacket> prtPackets;
 
   std::vector<uint64_t> missTimeFlag;
@@ -53,27 +53,20 @@ void SignalProcess::start(std::atomic<bool>& isRunningFlag) {
 
       }
       while (!_consumerQueue.empty()) {
-        // 检查数据是否足够
-        // if (rawData.size() < sizeof(UdpHeader)) {
-        //   std::cerr << "Error: Received data is too small to contain a header."
-        //             << std::endl;
-        //   return;
-        // }
-        // 解析数据
-        // 解析包头到 header
-
-        ReceivedPacket packet;
-        packet.payload = std::move(_consumerQueue.front());
+        recvPackets.push_back( std::move(_consumerQueue.front()));
         _consumerQueue.pop();
-        recvPackets.push_back(std::move(packet));
       }
     }
 
-      checkMissingPackets(recvPackets, missTimeFlag,
-                         prtPackets);  //记录丢包得时间戳直接丢掉
 
-    //函数执行结束
-    recvPackets.clear();
+    if (protocolType == Socket::ProtocolType::TCP) {
+      //检查丢包
+      checkMissingPacketsForTcp(recvPackets, missTimeFlag, prtPackets);
+    } else if (protocolType == Socket::ProtocolType::UDP) {
+     // checkMissingPackets(recvPackets, missTimeFlag, prtPackets);
+    }
+      //函数执行结束
+      recvPackets.clear();
 
     if (prtPackets.size() >= THREAD_POOL_NUM) {
       while (!prtPackets.empty()) {
@@ -89,45 +82,61 @@ void SignalProcess::start(std::atomic<bool>& isRunningFlag) {
 
 void SignalProcess::processData(prtPacket&& prt) {
 
- convertTimestamp(prt.header.timeStamp);
-  for (int i = 0; i < 10; i++) {
-    std::cout << prt.payload[i] << " , ";
-      }
-      std::cout << "\n";
 
+   //convertTimestamp(prt.header.timeStamp);
+ //std::cout << prt.payload.size() * sizeof(float) * 2 << "\n";
+ //printWithColor("blue",prt.payload.size() * sizeof(float) * 2);
+  for (int i = 0; i <10; i++) {
+    std::cout << prt.payload[i] << " , ";
+  }
+       std::cout << "\n";
 }
 
 // +------------------+--------------------+
 // |   UdpHeader      |     数据部分       |
 // +------------------+--------------------+
 
-std::queue<prtPacket> SignalProcess::checkMissingPackets(
-    std::vector<ReceivedPacket>& recvPackets,
+void SignalProcess::checkMissingPackets(
+    std::vector<std::vector<char>>& recvPackets,
     std::vector<uint64_t>& missTimeFlag, std::queue<prtPacket>& prtPackets) {
 
-  // 按时间戳（组序号）将数据包分类
-  std::unordered_map<uint64_t, std::unordered_set<uint16_t>>
-      groupPackets;  // 时间戳--分片集合
+  
+  std::vector<udpReceivedPacket> udpPackets;
+      // 按时间戳（组序号）将数据包分类
+      std::unordered_map<uint64_t, std::unordered_set<uint16_t>>
+          groupPackets;  // 时间戳--分片集合
   std::unordered_map<uint64_t, uint16_t> totalFragmentsMap;  // 时间戳--总包数
 
   for (auto& packet : recvPackets) {
+
     // 提取包头
-    memcpy(&packet.header, packet.payload.data(), sizeof(Header));
-    packet.payload.erase(packet.payload.begin(),
-                         packet.payload.begin() + sizeof(Header));
-    groupPackets[packet.header.timeStamp].insert(packet.header.sequence);
+    udpReceivedPacket udpPacket;
+    memcpy(&udpPacket.header, packet.data(), sizeof(Header));
+
+    packet.erase(packet.begin(), packet.begin() + sizeof(Header));
+
+    udpPacket.payload = std::move(packet);
+
+    udpPackets.push_back(std::move(udpPacket));
+
+    groupPackets[udpPacket.header.timeStamp].insert(udpPacket.header.sequence);
+    
     //每个分片序号插入到对应的时间戳对应的集合,如果有多组数据（多组时间戳），会插入新的键值对
     // 只有当总包数发生变化时，才更新 totalFragmentsMap，//只有当时间戳变化时插入新的键，在总包数变化时插入新的值
-    if (totalFragmentsMap[packet.header.timeStamp] != packet.header.total) {
+    if (totalFragmentsMap[udpPacket.header.timeStamp] !=
+        udpPacket.header.total) {
 
-      totalFragmentsMap[packet.header.timeStamp] = packet.header.total;  
+      totalFragmentsMap[udpPacket.header.timeStamp] = udpPacket.header.total;
+
     }
+
   }
 
 
 
       // 检查每个时间戳的数据包是否丢失
-      for (const auto& [timestamp, sequences] : groupPackets) {
+  for (const auto& [timestamp, sequences] : groupPackets) {
+    
         uint16_t totalFragments = totalFragmentsMap[timestamp];
 
         bool missing = false;
@@ -151,46 +160,51 @@ std::queue<prtPacket> SignalProcess::checkMissingPackets(
           //输出丢失的包的序号
           for (uint16_t i = 0; i < totalFragments; ++i) {
         if (sequences.find(i) == sequences.end()) {
-          printWithColor("red", i, " ");
+          //printWithColor("red", i, " ");
+          std::cout << i << " ";
         }
       }
         } else {
 
-          std::cout << "没有丢包" << std::endl;
 
           // 没有丢包，开始拼接有效数据
           Eigen::VectorXcf fullPayloadEigen;
           int length = 0;
-
+//int count = 0;
           // 计算有效数据的总复数个数
-          for (auto& packet : recvPackets) {
+          for (auto& packet : udpPackets) {
             //确定是没丢包的时间戳对应的数据包
             if (packet.header.timeStamp == timestamp) {
               length += packet.payload.size() /
                         (2 * sizeof(float));  // 每两个浮动数对应一个复数
+            //  count++;
             }
-      }
 
-      // 预分配空间
-      fullPayloadEigen.resize(length);
 
-      size_t idx = 0;  // 复数数据的索引
-                       // 再次遍历数据包并填充复数数据
-      int j = 0;
-      for (auto& packet : recvPackets) {
-        if (packet.header.timeStamp == timestamp) {
-    
-          float* payloadPtr = reinterpret_cast<float*>(packet.payload.data());
-
-          // 填充复数数据
-          for (size_t i = 0; i < packet.payload.size() / (2 * sizeof(float));
-               ++i) {
-            // 存入 Eigen 容器
-            fullPayloadEigen[idx++] =
-                std::complex<float>(payloadPtr[i * 2], payloadPtr[i * 2 + 1]);
-        
           }
-        }
+          //std::cout << "没有丢包,一共" << count << "个" << std::endl;
+          //count = 0;
+
+              // 预分配空间
+              fullPayloadEigen.resize(length);
+
+          size_t idx = 0;  // 复数数据的索引
+                           // 再次遍历数据包并填充复数数据
+          int j = 0;
+          for (auto& packet : udpPackets) {
+            if (packet.header.timeStamp == timestamp) {
+
+              float* payloadPtr =
+                  reinterpret_cast<float*>(packet.payload.data());
+
+              // 填充复数数据
+              for (size_t i = 0;
+                   i < packet.payload.size() / (2 * sizeof(float)); ++i) {
+                // 存入 Eigen 容器
+                fullPayloadEigen[idx++] = std::complex<float>(
+                    payloadPtr[i * 2], payloadPtr[i * 2 + 1]);
+              }
+            }
       }
 
       // 将最终数据保存到有效包中
@@ -201,8 +215,58 @@ std::queue<prtPacket> SignalProcess::checkMissingPackets(
     }
   }
 
-  return prtPackets;  //丢包时这里可能为空
 }
+
+void SignalProcess::checkMissingPacketsForTcp(
+    std::vector<std::vector<char>>& recvPackets,
+    std::vector<uint64_t>& missTimeFlag, std::queue<prtPacket>& prtPackets) {
+
+  
+std::vector<tcpReceivedPacket> tcpPackets;
+  //取出包头和负载存入priPackets
+  for (auto& packet : recvPackets) {
+    tcpReceivedPacket tcpPacket;
+    
+    // 提取包头
+    memcpy(&tcpPacket.header, packet.data(), sizeof(TcpHeader));
+    packet.erase(packet.begin(), packet.begin() + sizeof(Header));
+    tcpPacket.payload = std::move(packet);
+
+    tcpPackets.push_back(std::move(tcpPacket));
+
+    //  prtPackets.push(std::move(prt));
+  }
+
+  Eigen::VectorXcf fullPayloadEigen;
+  int length = 0;
+
+  // 计算有效数据的总复数个数
+  for (auto& packet : tcpPackets) {
+    //确定是没丢包的时间戳对应的数据包
+    
+      length = packet.payload.size() /
+                (2 * sizeof(float));  // 每两个浮动数对应一个复数
+      fullPayloadEigen.resize(length);
+
+      float* payloadPtr = reinterpret_cast<float*>(packet.payload.data());
+      size_t idx = 0;  // 复数数据的索引
+
+      for (size_t i = 0; i < packet.payload.size() / (2 * sizeof(float)); ++i) {
+        // 存入 Eigen 容器
+        fullPayloadEigen[idx++] =
+            std::complex<float>(payloadPtr[i * 2], payloadPtr[i * 2 + 1]);
+      }
+
+      // 将最终数据保存到有效包中
+      prtPacket validPacket;
+      validPacket.header.timeStamp = packet.header.timeStamp;
+      validPacket.payload = std::move(fullPayloadEigen);
+      prtPackets.push(std::move(validPacket));
+  }
+
+}
+
+
 void SignalProcess::convertTimestamp(uint64_t timestamp) {
   // 将毫秒时间戳转为秒
   auto seconds = std::chrono::seconds(timestamp / 1000);
