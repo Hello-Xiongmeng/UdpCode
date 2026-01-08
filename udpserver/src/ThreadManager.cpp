@@ -36,6 +36,8 @@ void ThreadManager::setThreadAttributes(pthread_attr_t& attr, int priority,
     return;
   }
 
+  std::cout << "  ";
+
 // 设置调度继承方式（在调试环境中跳过）,编译时没有 DEBUG 宏,正常执行，有编译时有 DEBUG 宏，编译时会跳过
 #ifndef DEBUG
   ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
